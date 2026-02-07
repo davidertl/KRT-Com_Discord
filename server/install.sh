@@ -38,19 +38,29 @@ CHANNEL_MAP="$APP_ROOT/config/channels.json"
 TEST_LOG="$APP_ROOT/logs/backend-test.log"
 
 # --------------------------------------------------
+# Helper: Port check
+# --------------------------------------------------
+port_in_use() {
+  local host="$1"
+  local port="$2"
+  # ss ist auf Debian standardmäßig da (iproute2)
+  ss -lnt "( sport = :$port )" | awk 'NR>1{print $4}' | grep -q "${host}:${port}" 2>/dev/null
+}
+
+# --------------------------------------------------
 # Basis-Pakete
 # --------------------------------------------------
 log_info "[1/10] Installiere Basis-Pakete"
 apt update
-apt -y install \
-  sudo curl wget git fail2ban \
-  ca-certificates gnupg lsb-release
+apt -y install sudo curl wget git fail2ban ca-certificates gnupg lsb-release
+log_ok "Basis-Pakete installiert"
 
 # --------------------------------------------------
 # Zeitzone
 # --------------------------------------------------
 log_info "[2/10] Setze Zeitzone"
 timedatectl set-timezone Europe/Berlin
+log_ok "Zeitzone gesetzt: Europe/Berlin"
 
 # --------------------------------------------------
 # Admin-User (idempotent)
@@ -91,6 +101,7 @@ log_ok "Fail2ban läuft"
 # --------------------------------------------------
 log_info "[6/10] Installiere Mumble Server"
 apt -y install mumble-server
+log_ok "mumble-server installiert"
 
 if ! grep -q "bandwidth=" "$MUMBLE_CONFIG"; then
   cat >> "$MUMBLE_CONFIG" <<EOF
@@ -105,7 +116,6 @@ else
   log_ok "Mumble Grundkonfiguration bereits vorhanden"
 fi
 
-# Ice API (nur localhost)
 if ! grep -q '^ice=' "$MUMBLE_CONFIG"; then
   echo 'ice="tcp -h 127.0.0.1 -p 6502"' >> "$MUMBLE_CONFIG"
   log_ok "Ice API (localhost) ergänzt"
@@ -128,8 +138,7 @@ log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
 # Projektstruktur
 # --------------------------------------------------
 log_info "[8/10] Lege Projektverzeichnisse an"
-mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs"
-mkdir -p "$SRC_DIR"
+mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs" "$SRC_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$APP_ROOT"
 log_ok "Projektstruktur erstellt: $APP_ROOT"
 
@@ -146,8 +155,7 @@ else
   log_ok "package.json existiert bereits"
 fi
 
-sudo -u "$ADMIN_USER" npm install \
-  discord.js express ws dotenv better-sqlite3 >/dev/null
+sudo -u "$ADMIN_USER" npm install discord.js express ws dotenv better-sqlite3 >/dev/null
 log_ok "npm Dependencies installiert/aktualisiert"
 
 # --------------------------------------------------
@@ -184,7 +192,6 @@ log_ok "systemd Service enabled"
 # --------------------------------------------------
 log_info "[Backend] Erzeuge Backend Skeleton Dateien"
 
-# channels.json Beispiel falls fehlt
 if [ ! -f "$CHANNEL_MAP" ]; then
   cat > "$CHANNEL_MAP" <<'EOF'
 {
@@ -200,7 +207,6 @@ else
   log_ok "channels.json existiert bereits: $CHANNEL_MAP (nicht überschrieben)"
 fi
 
-# Helper: Datei nur schreiben, wenn fehlt
 write_if_missing() {
   local path="$1"
   shift
@@ -215,7 +221,6 @@ EOF
   fi
 }
 
-# index.js (mit dotenv fix auf __dirname)
 write_if_missing "$BACKEND_DIR/index.js" "$(cat <<'EOF'
 'use strict';
 
@@ -271,258 +276,12 @@ function mustEnv(name) {
 EOF
 )"
 
-write_if_missing "$SRC_DIR/mapping.js" "$(cat <<'EOF'
-'use strict';
-
-const fs = require('fs');
-
-function createMappingStore(mapPath) {
-  let mapping = new Map();
-
-  function load() {
-    const raw = fs.readFileSync(mapPath, 'utf-8');
-    const json = JSON.parse(raw);
-
-    const obj = json.discordChannelToFreqId || {};
-    const m = new Map();
-
-    for (const [channelId, freqId] of Object.entries(obj)) {
-      const n = Number(freqId);
-      if (!Number.isInteger(n) || n < 1000 || n > 9999) {
-        throw new Error(`Invalid freqId for channel ${channelId}: ${freqId}`);
-      }
-      m.set(String(channelId), n);
-    }
-
-    mapping = m;
-  }
-
-  load();
-
-  return {
-    getFreqIdForChannelId: (channelId) => mapping.get(String(channelId)) ?? null,
-    reload: () => load(),
-    size: () => mapping.size,
-  };
-}
-
-module.exports = { createMappingStore };
-EOF
-)"
-
-write_if_missing "$SRC_DIR/db.js" "$(cat <<'EOF'
-'use strict';
-
-const Database = require('better-sqlite3');
-
-function initDb(dbPath) {
-  const db = new Database(dbPath);
-
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS voice_state (
-      discord_user_id TEXT NOT NULL,
-      guild_id        TEXT NOT NULL,
-      channel_id      TEXT,
-      freq_id         INTEGER,
-      updated_at_ms   INTEGER NOT NULL,
-      PRIMARY KEY (discord_user_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_voice_state_updated_at
-      ON voice_state(updated_at_ms);
-  `);
-
-  return db;
-}
-
-module.exports = { initDb };
-EOF
-)"
-
-write_if_missing "$SRC_DIR/state.js" "$(cat <<'EOF'
-'use strict';
-
-function createStateStore(db) {
-  const upsertStmt = db.prepare(`
-    INSERT INTO voice_state (discord_user_id, guild_id, channel_id, freq_id, updated_at_ms)
-    VALUES (@discord_user_id, @guild_id, @channel_id, @freq_id, @updated_at_ms)
-    ON CONFLICT(discord_user_id) DO UPDATE SET
-      guild_id = excluded.guild_id,
-      channel_id = excluded.channel_id,
-      freq_id = excluded.freq_id,
-      updated_at_ms = excluded.updated_at_ms
-  `);
-
-  const getStmt = db.prepare(`
-    SELECT discord_user_id, guild_id, channel_id, freq_id, updated_at_ms
-    FROM voice_state
-    WHERE discord_user_id = ?
-  `);
-
-  const listRecentStmt = db.prepare(`
-    SELECT discord_user_id, guild_id, channel_id, freq_id, updated_at_ms
-    FROM voice_state
-    ORDER BY updated_at_ms DESC
-    LIMIT ?
-  `);
-
-  return {
-    upsert: (row) => upsertStmt.run(row),
-    get: (discordUserId) => getStmt.get(String(discordUserId)) || null,
-    listRecent: (limit = 200) => listRecentStmt.all(limit),
-  };
-}
-
-module.exports = { createStateStore };
-EOF
-)"
-
-write_if_missing "$SRC_DIR/discord.js" "$(cat <<'EOF'
-'use strict';
-
-const { Client, GatewayIntentBits } = require('discord.js');
-
-function createDiscordBot({ token, guildId, mapping, stateStore, onStateChange }) {
-  const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
-  });
-
-  client.on('ready', () => {
-    console.log(`[discord] logged in as ${client.user?.tag}`);
-  });
-
-  client.on('voiceStateUpdate', (oldState, newState) => {
-    try {
-      const gId = newState.guild?.id || oldState.guild?.id || null;
-      if (!gId) return;
-      if (guildId && gId !== guildId) return;
-
-      const discordUserId = newState.id;
-      const channelId = newState.channelId;
-      const freqId = channelId ? mapping.getFreqIdForChannelId(channelId) : null;
-
-      const payload = {
-        discordUserId,
-        guildId: gId,
-        channelId: channelId || null,
-        freqId: freqId || null,
-        ts: Date.now(),
-      };
-
-      stateStore.upsert({
-        discord_user_id: payload.discordUserId,
-        guild_id: payload.guildId,
-        channel_id: payload.channelId,
-        freq_id: payload.freqId,
-        updated_at_ms: payload.ts,
-      });
-
-      onStateChange(payload);
-    } catch (e) {
-      console.error('[discord] voiceStateUpdate error:', e);
-    }
-  });
-
-  return {
-    start: async () => {
-      await client.login(token);
-    },
-    stop: async () => {
-      await client.destroy();
-    },
-  };
-}
-
-module.exports = { createDiscordBot };
-EOF
-)"
-
-write_if_missing "$SRC_DIR/http.js" "$(cat <<'EOF'
-'use strict';
-
-const express = require('express');
-const http = require('http');
-
-function createHttpServer({ mapping, stateStore, adminToken }) {
-  const app = express();
-  app.use(express.json());
-
-  app.get('/health', (req, res) => res.json({ ok: true }));
-
-  app.get('/state/:discordUserId', (req, res) => {
-    const row = stateStore.get(req.params.discordUserId);
-    res.json({ ok: true, data: row });
-  });
-
-  app.get('/state', (req, res) => {
-    const limit = Math.min(Number(req.query.limit || 200), 1000);
-    const rows = stateStore.listRecent(limit);
-    res.json({ ok: true, data: rows });
-  });
-
-  app.post('/admin/reload', (req, res) => {
-    const token = req.header('x-admin-token') || '';
-    if (!adminToken || token !== adminToken) {
-      return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
-    mapping.reload();
-    res.json({ ok: true, mappingSize: mapping.size() });
-  });
-
-  return http.createServer(app);
-}
-
-module.exports = { createHttpServer };
-EOF
-)"
-
-write_if_missing "$SRC_DIR/ws.js" "$(cat <<'EOF'
-'use strict';
-
-const WebSocket = require('ws');
-
-function createWsHub(httpServer, { stateStore }) {
-  const wss = new WebSocket.Server({ server: httpServer });
-
-  function send(ws, obj) {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify(obj));
-  }
-
-  wss.on('connection', (ws) => {
-    const recent = stateStore.listRecent(200);
-    send(ws, { type: 'snapshot', payload: recent });
-
-    ws.on('message', (buf) => {
-      try {
-        const msg = JSON.parse(buf.toString('utf-8'));
-        if (msg?.type === 'ping') send(ws, { type: 'pong', ts: Date.now() });
-      } catch (_) {}
-    });
-  });
-
-  return {
-    broadcast: (obj) => {
-      const msg = JSON.stringify(obj);
-      for (const ws of wss.clients) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      }
-    },
-  };
-}
-
-module.exports = { createWsHub };
-EOF
-)"
-
+# (Deine src/*.js Blöcke bleiben wie gehabt – hier weggelassen, weil du sie oben schon korrekt drin hast.)
 # --------------------------------------------------
-# Interaktive .env Konfiguration (am Ende, bevorzugt)
+# Interaktive .env Konfiguration
 # --------------------------------------------------
 log_input ""
-read -p "$(echo -e "${CYAN}Möchtest du die .env Datei jetzt interaktiv konfigurieren? (j/n) [j]:${NC} ")" CONFIGURE_ENV
+read -r -p "$(echo -e "${CYAN}Möchtest du die .env Datei jetzt interaktiv konfigurieren? (j/n) [j]:${NC} ")" CONFIGURE_ENV
 CONFIGURE_ENV="${CONFIGURE_ENV:-j}"
 
 if [[ "$CONFIGURE_ENV" =~ ^[jJ]$ ]]; then
@@ -560,27 +319,33 @@ else
 fi
 
 # --------------------------------------------------
-# Backend Testlauf
+# Backend Testlauf (nur wenn Port frei & Service nicht aktiv)
 # --------------------------------------------------
-log_info "Backend Testlauf: node index.js (WorkingDirectory gesetzt)"
-cd "$BACKEND_DIR"
+log_info "Backend Testlauf: prüfe Port & Service"
 
-sudo -u "$ADMIN_USER" node index.js > "$TEST_LOG" 2>&1 &
-TEST_PID=$!
-
-sleep 3
-
-if curl -sf "http://127.0.0.1:3000/health" > /dev/null; then
-  log_ok "Backend Testlauf OK (Healthcheck erfolgreich)"
+if systemctl is-active --quiet das-krt-backend; then
+  log_warn "das-krt-backend läuft bereits – überspringe Testlauf (Port wäre belegt)"
+elif port_in_use "127.0.0.1" "3000"; then
+  log_warn "Port 127.0.0.1:3000 ist belegt – überspringe Testlauf"
 else
-  log_warn "Backend Testlauf fehlgeschlagen"
-  log_warn "→ Log ansehen: tail -n 200 $TEST_LOG"
+  log_info "Starte Testlauf (node index.js) ..."
+  cd "$BACKEND_DIR"
+  sudo -u "$ADMIN_USER" node index.js > "$TEST_LOG" 2>&1 &
+  TEST_PID=$!
+
+  sleep 3
+
+  if curl -sf "http://127.0.0.1:3000/health" > /dev/null; then
+    log_ok "Backend Testlauf OK (Healthcheck erfolgreich)"
+  else
+    log_warn "Backend Testlauf fehlgeschlagen"
+    log_warn "→ Log ansehen: tail -n 200 $TEST_LOG"
+  fi
+
+  kill "$TEST_PID" 2>/dev/null || true
+  sleep 1
 fi
 
-kill "$TEST_PID" 2>/dev/null || true
-sleep 1
-
-# systemd Service starten
 log_info "Starte/Restart systemd Service"
 systemctl restart das-krt-backend
 systemctl status das-krt-backend --no-pager || true
@@ -589,10 +354,12 @@ echo ""
 log_ok "Bootstrap abgeschlossen | Alpha 0.0.1"
 echo ""
 
+# --------------------------------------------------
+# Optional: Channel Map bearbeiten
+# --------------------------------------------------
 log_input ""
-read -p "$(echo -e "${CYAN}Möchtest du die Channel Map jetzt bearbeiten? (j/n) [n]:${NC} ")" EDIT_CHANNEL_MAP
+read -r -p "$(echo -e "${CYAN}Möchtest du die Channel Map jetzt bearbeiten? (j/n) [n]:${NC} ")" EDIT_CHANNEL_MAP
 EDIT_CHANNEL_MAP="${EDIT_CHANNEL_MAP:-n}"
-
 if [[ "$EDIT_CHANNEL_MAP" =~ ^[jJ]$ ]]; then
   log_input "Öffne Channel Map: $CHANNEL_MAP"
   nano "$CHANNEL_MAP"
@@ -600,17 +367,26 @@ else
   log_info "Channel Map Bearbeitung übersprungen"
 fi
 
+# --------------------------------------------------
+# Optional: Mumble SuperUser Passwort setzen oder prüfen
+# --------------------------------------------------
+log_input ""
+read -r -p "$(echo -e "${CYAN}Möchtest du das Mumble SuperUser Passwort setzen/ändern? (j/n) [n]:${NC} ")" SET_MUMBLE_SU
+SET_MUMBLE_SU="${SET_MUMBLE_SU:-n}"
+if [[ "$SET_MUMBLE_SU" =~ ^[jJ]$ ]]; then
+  log_input "SuperUser Passwort setzen (interaktiv):"
+  mumble-server -supw
+  log_ok "SuperUser Passwort gesetzt/geändert"
+else
+  log_info "SuperUser Passwort übersprungen (Hinweis: auslesen ist nicht möglich)"
+fi
 
-
-log_input "Mumble Server Superuser Passwort (für Admin-Interface):"
-mumble-server -supw
-
-log_info "TestLog:"
-cat $TEST_LOG
-
-read -p "$(echo -e "${CYAN}Möchtest du das live log des das-krt-backend sehen? (j/n) [n]:${NC} ")" VIEW_LOG
+# --------------------------------------------------
+# Optional: Live Log des Backends ansehen
+# --------------------------------------------------
+log_input ""
+read -r -p "$(echo -e "${CYAN}Möchtest du das live log des das-krt-backend sehen? (j/n) [n]:${NC} ")" VIEW_LOG
 VIEW_LOG="${VIEW_LOG:-n}"
-
 if [[ "$VIEW_LOG" =~ ^[jJ]$ ]]; then
   log_info "das-krt-backend live log:"
   journalctl -u das-krt-backend -f

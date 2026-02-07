@@ -155,6 +155,8 @@ else
   log_ok "package.json existiert bereits"
 fi
 
+apt -y install sudo curl wget git fail2ban ca-certificates gnupg lsb-release \
+  build-essential python3 pkg-config sqlite3 libsqlite3-dev
 sudo -u "$ADMIN_USER" npm install discord.js express ws dotenv better-sqlite3 >/dev/null
 log_ok "npm Dependencies installiert/aktualisiert"
 
@@ -647,14 +649,55 @@ while true; do
 
   case "$CHOICE" in
     1)
-      log_input "Öffne: $CHANNEL_MAP"
       nano "$CHANNEL_MAP"
+
+      ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
+      if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
+      if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
+        log_ok "channels.json neu geladen (/admin/reload)"
+      else
+        log_warn "Reload fehlgeschlagen – starte Backend neu"
+        systemctl restart das-krt-backend
+        log_ok "Backend neu gestartet (Mapping neu geladen)"
+      fi
+      else
+        log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
+        systemctl restart das-krt-backend
+        log_ok "Backend neu gestartet (Mapping neu geladen)"
+      fi
+
       ;;
     2)
-      log_input "Setze/ändere SuperUser Passwort (interaktiv):"
-      mumble-server -supw
-      log_ok "SuperUser Passwort gesetzt/geändert"
+      log_input "SuperUser Passwort setzen/ändern (Eingabe unsichtbar)"
+
+      while true; do
+        read -s -p "$(echo -e "${CYAN}Neues SuperUser Passwort:${NC} ")" MUMBLE_PW_1
+        echo ""
+        read -s -p "$(echo -e "${CYAN}Wiederholen:${NC} ")" MUMBLE_PW_2
+        echo ""
+
+        if [ -z "$MUMBLE_PW_1" ]; then
+          log_error "Passwort darf nicht leer sein."
+          continue
+        fi
+
+        if [ "$MUMBLE_PW_1" != "$MUMBLE_PW_2" ]; then
+          log_error "Passwörter stimmen nicht überein. Bitte erneut."
+          continue
+        fi
+
+        mumble-server -supw "$MUMBLE_PW_1"
+        if [ $? -eq 0 ]; then
+          log_ok "SuperUser Passwort erfolgreich gesetzt"
+        else
+          log_error "Fehler beim Setzen des SuperUser Passworts"
+        fi
+
+        unset MUMBLE_PW_1 MUMBLE_PW_2
+        break
+      done
       ;;
+
     3)
       log_info "Healthcheck: http://127.0.0.1:3000/health"
       if curl -sf "http://127.0.0.1:3000/health" > /dev/null; then

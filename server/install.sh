@@ -589,8 +589,29 @@ echo ""
 log_ok "Bootstrap abgeschlossen | Alpha 0.0.1"
 echo ""
 
-log_info "Restschritte:"
-echo "  • murmurd -supw   (Mumble SuperUser Passwort setzen)"
-echo "  • $CHANNEL_MAP anpassen (Discord Channel IDs → freqId)"
-echo "  • Logs: journalctl -u das-krt-backend -f"
-echo "  • Testlog: $TEST_LOG"
+log_input ""
+read -p "$(echo -e "${CYAN}Möchtest du die Channel Map jetzt bearbeiten? (j/n) [n]:${NC} ")" EDIT_CHANNEL_MAP
+EDIT_CHANNEL_MAP="${EDIT_CHANNEL_MAP:-n}"
+
+if [[ "$EDIT_CHANNEL_MAP" =~ ^[jJ]$ ]]; then
+  log_input "Öffne Channel Map: $CHANNEL_MAP"
+  nano "$CHANNEL_MAP"
+else
+  log_info "Channel Map Bearbeitung übersprungen"
+fi
+
+
+
+log_input "Mumble Server Superuser Passwort (für Admin-Interface):"
+mumble-server -supw
+
+log_info "TestLog:"
+cat $TEST_LOG
+
+read -p "$(echo -e "${CYAN}Möchtest du das live log des das-krt-backend sehen? (j/n) [n]:${NC} ")" VIEW_LOG
+VIEW_LOG="${VIEW_LOG:-n}"
+
+if [[ "$VIEW_LOG" =~ ^[jJ]$ ]]; then
+  log_info "das-krt-backend live log:"
+  journalctl -u das-krt-backend -f
+fi

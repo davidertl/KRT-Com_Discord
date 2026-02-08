@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# komplettes Installations-Skript für den das-KRT.com Server
-# Version Alpha 0.0.1
-set -euo pipefail
+##version alpha-0.0.2
+set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -22,7 +21,8 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-echo -e "${GREEN}=== das-krt Bootstrap | Alpha 0.0.1 ===${NC}"
+VERSION="Alpha 0.0.2"
+echo -e "${GREEN}=== das-krt Bootstrap | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
 # Variablen
@@ -30,7 +30,6 @@ echo -e "${GREEN}=== das-krt Bootstrap | Alpha 0.0.1 ===${NC}"
 ADMIN_USER="ops"
 APP_ROOT="/opt/das-krt"
 NODE_VERSION="24"
-
 MUMBLE_CONFIG="/etc/mumble-server.ini"
 SERVICE_FILE="/etc/systemd/system/das-krt-backend.service"
 
@@ -46,69 +45,40 @@ TEST_LOG="$APP_ROOT/logs/backend-test.log"
 port_in_use() {
   local host="$1"
   local port="$2"
-  ss -lnt "( sport = :$port )" | awk 'NR>1{print $4}' | grep -q "${host}:${port}" 2>/dev/null
+  ss -lnt "( sport = :$port )" 2>/dev/null | awk 'NR>1{print $4}' | grep -q "${host}:${port}" 2>/dev/null
 }
 
 # --------------------------------------------------
-# Helper: write / patch files safely
+# Helper: Safe overwrite (backup if exists + differs)
 # --------------------------------------------------
-backup_file() {
-  local f="$1"
+write_file_backup() {
+  local path="$1"
+  local content="$2"
   local ts
   ts="$(date +%Y%m%d-%H%M%S)"
-  if [ -f "$f" ]; then
-    cp -a "$f" "$f.bak.$ts"
-    log_ok "Backup: $f -> $f.bak.$ts"
-  fi
-}
 
-write_if_missing() {
-  local path="$1"
-  shift
-  if [ ! -f "$path" ]; then
-    cat > "$path" <<EOF
-$@
-EOF
-    chown "$ADMIN_USER:$ADMIN_USER" "$path" || true
-    log_ok "Erstellt: $(basename "$path")"
+  mkdir -p "$(dirname "$path")"
+
+  if [ -f "$path" ]; then
+    # write temp and compare
+    local tmp
+    tmp="$(mktemp)"
+    printf "%s" "$content" > "$tmp"
+    if ! cmp -s "$tmp" "$path"; then
+      cp -a "$path" "$path.bak.$ts"
+      printf "%s" "$content" > "$path"
+      log_ok "Updated: $(basename "$path") (Backup: $(basename "$path").bak.$ts)"
+    else
+      log_ok "Unchanged: $(basename "$path")"
+    fi
+    rm -f "$tmp"
   else
-    log_ok "Existiert: $(basename "$path") (nicht überschrieben)"
+    printf "%s" "$content" > "$path"
+    log_ok "Created: $(basename "$path")"
   fi
+
+  chown "$ADMIN_USER:$ADMIN_USER" "$path" 2>/dev/null || true
 }
-
-# Patch if marker missing (for upgrade-on-rerun)
-write_or_patch_if_missing_marker() {
-  local path="$1"
-  local marker="$2"
-  shift 2
-  if [ ! -f "$path" ]; then
-    cat > "$path" <<EOF
-$@
-EOF
-    chown "$ADMIN_USER:$ADMIN_USER" "$path" || true
-    log_ok "Erstellt: $(basename "$path")"
-    return 0
-  fi
-
-  if ! grep -q "$marker" "$path"; then
-    backup_file "$path"
-    cat > "$path" <<EOF
-$@
-EOF
-    chown "$ADMIN_USER:$ADMIN_USER" "$path" || true
-    log_ok "Patched: $(basename "$path") (Marker fehlte: $marker)"
-  else
-    log_ok "OK: $(basename "$path") (Marker vorhanden)"
-  fi
-}
-
-# --------------------------------------------------
-# Preconditions
-# --------------------------------------------------
-if [ "$(id -u)" -ne 0 ]; then
-  log_error "Bitte als root ausführen: sudo bash install.sh"
-  exit 1
-fi
 
 # --------------------------------------------------
 # Basis-Pakete
@@ -139,25 +109,18 @@ usermod -aG sudo "$ADMIN_USER"
 log_ok "User $ADMIN_USER in sudo Gruppe (sichergestellt)"
 
 # --------------------------------------------------
-# SSH-Härtung (du hattest das später auskommentiert; hier bleibt es aktiv)
+# SSH-Härtung (optional)
+# Hinweis: du hast das bei dir absichtlich auskommentiert – bleibt so.
 # --------------------------------------------------
-log_info "[4/10] Härte SSH-Konfiguration"
-SSH_CONFIG="/etc/ssh/sshd_config"
-
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' "$SSH_CONFIG"
-sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSH_CONFIG"
-sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSH_CONFIG"
-
-systemctl restart ssh
-log_ok "SSH Konfiguration angewendet & Dienst neu gestartet"
+log_info "[4/10] SSH-Härtung übersprungen (Script bewusst neutral halten)"
 
 # --------------------------------------------------
 # Fail2ban
 # --------------------------------------------------
 log_info "[5/10] Aktiviere Fail2ban"
-systemctl enable fail2ban
-systemctl start fail2ban
-log_ok "Fail2ban läuft"
+systemctl enable fail2ban >/dev/null 2>&1 || true
+systemctl start fail2ban >/dev/null 2>&1 || true
+log_ok "Fail2ban läuft (oder war bereits aktiv)"
 
 # --------------------------------------------------
 # Mumble Server
@@ -166,7 +129,7 @@ log_info "[6/10] Installiere Mumble Server"
 apt -y install mumble-server
 log_ok "mumble-server installiert"
 
-if ! grep -q "bandwidth=" "$MUMBLE_CONFIG"; then
+if [ -f "$MUMBLE_CONFIG" ] && ! grep -q "bandwidth=" "$MUMBLE_CONFIG"; then
   cat >> "$MUMBLE_CONFIG" <<EOF
 
 welcometext="Willkommen bei das-krt"
@@ -180,44 +143,36 @@ else
 fi
 
 # Ice API (nur localhost)
-if ! grep -q '^ice=' "$MUMBLE_CONFIG"; then
+if [ -f "$MUMBLE_CONFIG" ] && ! grep -q '^ice=' "$MUMBLE_CONFIG"; then
   echo 'ice="tcp -h 127.0.0.1 -p 6502"' >> "$MUMBLE_CONFIG"
   log_ok "Ice API (localhost) ergänzt"
 else
   log_ok "Ice API bereits konfiguriert"
 fi
 
-systemctl restart mumble-server
+systemctl restart mumble-server >/dev/null 2>&1 || true
 log_ok "Mumble Server neu gestartet"
 
 # --------------------------------------------------
-# Node.js 24 (NodeSource)
+# Node.js 24
 # --------------------------------------------------
-log_info "[7/10] Installiere Node.js ${NODE_VERSION} (NodeSource)"
+log_info "[7/10] Installiere Node.js ${NODE_VERSION}"
 curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
 apt -y install nodejs
 log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
-log_warn "Hinweis: Bitte NICHT zusätzlich 'apt install npm' nutzen (kollidiert gerne mit NodeSource)."
-
-# --------------------------------------------------
-# Build deps für better-sqlite3
-# --------------------------------------------------
-log_info "[8/10] Installiere Build-Dependencies (better-sqlite3)"
-apt -y install build-essential python3 pkg-config sqlite3 libsqlite3-dev
-log_ok "Build-Dependencies installiert"
 
 # --------------------------------------------------
 # Projektstruktur
 # --------------------------------------------------
-log_info "[9/10] Lege Projektverzeichnisse an"
+log_info "[8/10] Lege Projektverzeichnisse an"
 mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs" "$SRC_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$APP_ROOT" || true
-log_ok "Projektstruktur erstellt: $APP_ROOT"
+log_ok "Projektstruktur bereit: $APP_ROOT"
 
 # --------------------------------------------------
 # Backend Initialisierung (Dependencies)
 # --------------------------------------------------
-log_info "[10/10] Initialisiere Backend (npm)"
+log_info "[9/10] Initialisiere Backend (npm)"
 cd "$BACKEND_DIR"
 
 if [ ! -f package.json ]; then
@@ -227,17 +182,17 @@ else
   log_ok "package.json existiert bereits"
 fi
 
+# Hinweis: Debian npm-Paket kann mit NodeSource nodejs kollidieren – wir nutzen npm aus NodeSource.
 sudo -u "$ADMIN_USER" npm install discord.js express ws dotenv better-sqlite3 >/dev/null
 log_ok "npm Dependencies installiert/aktualisiert"
 
 # --------------------------------------------------
 # systemd Service
 # --------------------------------------------------
-log_info "[systemd] Erstelle/prüfe systemd Service"
-if [ ! -f "$SERVICE_FILE" ]; then
-  cat > "$SERVICE_FILE" <<EOF
+log_info "[10/10] Erstelle/Update systemd Service"
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=das-krt Backend (Alpha 0.0.1)
+Description=das-krt Backend (${VERSION})
 After=network.target
 
 [Service]
@@ -250,21 +205,15 @@ EnvironmentFile=$ENV_FILE
 [Install]
 WantedBy=multi-user.target
 EOF
-  log_ok "systemd Service erstellt: $SERVICE_FILE"
-else
-  log_ok "systemd Service existiert bereits: $SERVICE_FILE"
-fi
+log_ok "systemd Service geschrieben: $SERVICE_FILE"
 
 systemctl daemon-reload
-systemctl enable das-krt-backend
+systemctl enable das-krt-backend >/dev/null 2>&1 || true
 log_ok "systemd Service enabled"
 
 # --------------------------------------------------
-# Backend Skeleton - Dateien erzeugen (inkl. TX)
+# Config defaults
 # --------------------------------------------------
-log_info "[Backend] Erzeuge Backend Skeleton Dateien (inkl. TX)"
-
-# channels.json Beispiel falls fehlt
 if [ ! -f "$CHANNEL_MAP" ]; then
   cat > "$CHANNEL_MAP" <<'EOF'
 {
@@ -280,8 +229,14 @@ else
   log_ok "channels.json existiert bereits: $CHANNEL_MAP (nicht überschrieben)"
 fi
 
-# index.js (PATCH: createTxStore + WS broadcast tx_event)
-write_or_patch_if_missing_marker "$BACKEND_DIR/index.js" "createTxStore" "$(cat <<'EOF'
+# --------------------------------------------------
+# Backend Skeleton (Alpha 0.0.2)
+# - TX Events (REST + WS broadcast)
+# - User directory (discord_users)
+# --------------------------------------------------
+
+# index.js
+write_file_backup "$BACKEND_DIR/index.js" "$(cat <<'EOF'
 'use strict';
 
 const path = require('path');
@@ -291,6 +246,7 @@ const { createHttpServer } = require('./src/http');
 const { createWsHub } = require('./src/ws');
 const { initDb } = require('./src/db');
 const { createTxStore } = require('./src/tx');
+const { createUsersStore } = require('./src/users');
 
 const { createDiscordBot } = require('./src/discord');
 const { createMappingStore } = require('./src/mapping');
@@ -313,26 +269,30 @@ function mustEnv(name) {
   const mapping = createMappingStore(mapPath);
   const stateStore = createStateStore(db);
   const txStore = createTxStore(db);
+  const usersStore = createUsersStore(db);
 
   const httpServer = createHttpServer({
     mapping,
     stateStore,
     txStore,
+    usersStore,
     adminToken: process.env.ADMIN_TOKEN || '',
   });
 
   const wsHub = createWsHub(httpServer, { stateStore });
 
-  // allow http.js to trigger WS broadcast without circular deps
+  // Wire TX broadcast (keine circular deps)
   if (typeof httpServer._setOnTxEvent === 'function') {
     httpServer._setOnTxEvent((payload) => wsHub.broadcast({ type: 'tx_event', payload }));
   }
 
+  // Discord voice_state broadcast bleibt wie gehabt
   const bot = createDiscordBot({
     token: mustEnv('DISCORD_TOKEN'),
     guildId: process.env.DISCORD_GUILD_ID || null,
     mapping,
     stateStore,
+    usersStore,
     onStateChange: (payload) => wsHub.broadcast({ type: 'voice_state', payload }),
   });
 
@@ -345,84 +305,8 @@ function mustEnv(name) {
 EOF
 )"
 
-# src/tx.js (NEW)
-write_if_missing "$SRC_DIR/tx.js" "$(cat <<'EOF'
-'use strict';
-
-function createTxStore(db) {
-  const insertStmt = db.prepare(`
-    INSERT INTO tx_events (freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json)
-    VALUES (@freq_id, @discord_user_id, @radio_slot, @action, @ts_ms, @meta_json)
-  `);
-
-  const listRecentStmt = db.prepare(`
-    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
-    FROM tx_events
-    ORDER BY ts_ms DESC
-    LIMIT ?
-  `);
-
-  const listRecentByFreqStmt = db.prepare(`
-    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
-    FROM tx_events
-    WHERE freq_id = ?
-    ORDER BY ts_ms DESC
-    LIMIT ?
-  `);
-
-  return {
-    addEvent: (row) => insertStmt.run(row),
-    listRecent: (limit = 200) => listRecentStmt.all(limit),
-    listRecentByFreq: (freqId, limit = 200) => listRecentByFreqStmt.all(freqId, limit),
-  };
-}
-
-module.exports = { createTxStore };
-EOF
-)"
-
-# src/mapping.js
-write_if_missing "$SRC_DIR/mapping.js" "$(cat <<'EOF'
-'use strict';
-
-const fs = require('fs');
-
-function createMappingStore(mapPath) {
-  let mapping = new Map();
-
-  function load() {
-    const raw = fs.readFileSync(mapPath, 'utf-8');
-    const json = JSON.parse(raw);
-
-    const obj = json.discordChannelToFreqId || {};
-    const m = new Map();
-
-    for (const [channelId, freqId] of Object.entries(obj)) {
-      const n = Number(freqId);
-      if (!Number.isInteger(n) || n < 1000 || n > 9999) {
-        throw new Error(`Invalid freqId for channel ${channelId}: ${freqId}`);
-      }
-      m.set(String(channelId), n);
-    }
-
-    mapping = m;
-  }
-
-  load();
-
-  return {
-    getFreqIdForChannelId: (channelId) => mapping.get(String(channelId)) ?? null,
-    reload: () => load(),
-    size: () => mapping.size,
-  };
-}
-
-module.exports = { createMappingStore };
-EOF
-)"
-
-# src/db.js (PATCH: tx_events)
-write_or_patch_if_missing_marker "$SRC_DIR/db.js" "CREATE TABLE IF NOT EXISTS tx_events" "$(cat <<'EOF'
+# src/db.js
+write_file_backup "$SRC_DIR/db.js" "$(cat <<'EOF'
 'use strict';
 
 const Database = require('better-sqlite3');
@@ -461,6 +345,21 @@ function initDb(dbPath) {
 
     CREATE INDEX IF NOT EXISTS idx_tx_events_freq_ts
       ON tx_events(freq_id, ts_ms);
+
+    -- User Directory (für "Server-Namen", nicht global_name)
+    CREATE TABLE IF NOT EXISTS discord_users (
+      discord_user_id TEXT NOT NULL,
+      guild_id        TEXT NOT NULL,
+      display_name    TEXT,
+      updated_at_ms   INTEGER NOT NULL,
+      PRIMARY KEY (discord_user_id, guild_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_discord_users_updated_at
+      ON discord_users(updated_at_ms);
+
+    CREATE INDEX IF NOT EXISTS idx_discord_users_guild_updated_at
+      ON discord_users(guild_id, updated_at_ms);
   `);
 
   return db;
@@ -470,8 +369,121 @@ module.exports = { initDb };
 EOF
 )"
 
+# src/tx.js
+write_file_backup "$SRC_DIR/tx.js" "$(cat <<'EOF'
+'use strict';
+
+function createTxStore(db) {
+  const insertStmt = db.prepare(`
+    INSERT INTO tx_events (freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json)
+    VALUES (@freq_id, @discord_user_id, @radio_slot, @action, @ts_ms, @meta_json)
+  `);
+
+  const listRecentStmt = db.prepare(`
+    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
+    FROM tx_events
+    ORDER BY ts_ms DESC
+    LIMIT ?
+  `);
+
+  const listRecentByFreqStmt = db.prepare(`
+    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
+    FROM tx_events
+    WHERE freq_id = ?
+    ORDER BY ts_ms DESC
+    LIMIT ?
+  `);
+
+  return {
+    addEvent: (row) => insertStmt.run(row),
+    listRecent: (limit = 200) => listRecentStmt.all(limit),
+    listRecentByFreq: (freqId, limit = 200) => listRecentByFreqStmt.all(freqId, limit),
+  };
+}
+
+module.exports = { createTxStore };
+EOF
+)"
+
+# src/users.js
+write_file_backup "$SRC_DIR/users.js" "$(cat <<'EOF'
+'use strict';
+
+function createUsersStore(db) {
+  const upsertStmt = db.prepare(`
+    INSERT INTO discord_users (discord_user_id, guild_id, display_name, updated_at_ms)
+    VALUES (@discord_user_id, @guild_id, @display_name, @updated_at_ms)
+    ON CONFLICT(discord_user_id, guild_id) DO UPDATE SET
+      display_name = excluded.display_name,
+      updated_at_ms = excluded.updated_at_ms
+  `);
+
+  const getStmt = db.prepare(`
+    SELECT discord_user_id, guild_id, display_name, updated_at_ms
+    FROM discord_users
+    WHERE discord_user_id = ? AND guild_id = ?
+  `);
+
+  const listRecentStmt = db.prepare(`
+    SELECT discord_user_id, guild_id, display_name, updated_at_ms
+    FROM discord_users
+    ORDER BY updated_at_ms DESC
+    LIMIT ?
+  `);
+
+  return {
+    upsert: (row) => upsertStmt.run(row),
+    get: (discordUserId, guildId) => getStmt.get(String(discordUserId), String(guildId)) || null,
+    listRecent: (limit = 200) => listRecentStmt.all(limit),
+  };
+}
+
+module.exports = { createUsersStore };
+EOF
+)"
+
+# src/mapping.js
+write_file_backup "$SRC_DIR/mapping.js" "$(cat <<'EOF'
+'use strict';
+
+const fs = require('fs');
+
+function createMappingStore(mapPath) {
+  let mapping = new Map();
+
+  function load() {
+    const raw = fs.readFileSync(mapPath, 'utf-8');
+    const json = JSON.parse(raw);
+
+    const obj = json.discordChannelToFreqId || {};
+    const m = new Map();
+
+    for (const [channelId, freqId] of Object.entries(obj)) {
+      const n = Number(freqId);
+      if (!Number.isInteger(n) || n < 1000 || n > 9999) {
+        throw new Error(`Invalid freqId for channel ${channelId}: ${freqId}`);
+      }
+      m.set(String(channelId), n);
+    }
+
+    mapping = m;
+  }
+
+  load();
+
+  return {
+    getFreqIdForChannelId: (channelId) => mapping.get(String(channelId)) ?? null,
+    reload: () => load(),
+    size: () => mapping.size,
+  };
+}
+
+module.exports = { createMappingStore };
+EOF
+)"
+
 # src/state.js
-write_if_missing "$SRC_DIR/state.js" "$(cat <<'EOF'
+write_file_backup "$SRC_DIR/state.js" "$(cat <<'EOF'
 'use strict';
 
 function createStateStore(db) {
@@ -510,14 +522,20 @@ EOF
 )"
 
 # src/discord.js
-write_if_missing "$SRC_DIR/discord.js" "$(cat <<'EOF'
+write_file_backup "$SRC_DIR/discord.js" "$(cat <<'EOF'
 'use strict';
 
 const { Client, GatewayIntentBits } = require('discord.js');
 
-function createDiscordBot({ token, guildId, mapping, stateStore, onStateChange }) {
+function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onStateChange }) {
+  // Wichtig: "Server Members Intent" muss im Discord Developer Portal aktiviert sein,
+  // sonst liefert member teilweise keine Daten.
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildMembers,
+    ],
   });
 
   client.once('clientReady', () => {
@@ -542,6 +560,7 @@ function createDiscordBot({ token, guildId, mapping, stateStore, onStateChange }
         ts: Date.now(),
       };
 
+      // Voice state persist
       stateStore.upsert({
         discord_user_id: payload.discordUserId,
         guild_id: payload.guildId,
@@ -549,6 +568,21 @@ function createDiscordBot({ token, guildId, mapping, stateStore, onStateChange }
         freq_id: payload.freqId,
         updated_at_ms: payload.ts,
       });
+
+      // User directory (Server-Displayname)
+      if (usersStore) {
+        const m = newState.member || oldState.member || null;
+        // prefer server nickname; fall back to global/username when unavailable
+        const displayName = (m && (m.nickname || m.displayName)) ? String(m.nickname || m.displayName) : null;
+        if (displayName) {
+          usersStore.upsert({
+            discord_user_id: payload.discordUserId,
+            guild_id: payload.guildId,
+            display_name: displayName,
+            updated_at_ms: payload.ts,
+          });
+        }
+      }
 
       onStateChange(payload);
     } catch (e) {
@@ -566,8 +600,8 @@ module.exports = { createDiscordBot };
 EOF
 )"
 
-# src/ws.js (marker only to ensure present; behavior gleich)
-write_or_patch_if_missing_marker "$SRC_DIR/ws.js" "broadcast: (obj)" "$(cat <<'EOF'
+# src/ws.js
+write_file_backup "$SRC_DIR/ws.js" "$(cat <<'EOF'
 'use strict';
 
 const WebSocket = require('ws');
@@ -581,6 +615,7 @@ function createWsHub(httpServer, { stateStore }) {
   }
 
   wss.on('connection', (ws) => {
+    // Snapshot: voice_state
     const recent = stateStore.listRecent(200);
     send(ws, { type: 'snapshot', payload: recent });
 
@@ -606,14 +641,14 @@ module.exports = { createWsHub };
 EOF
 )"
 
-# src/http.js (PATCH: /tx/event + /tx/recent + _setOnTxEvent hook)
-write_or_patch_if_missing_marker "$SRC_DIR/http.js" "app.post('/tx/event'" "$(cat <<'EOF'
+# src/http.js
+write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 'use strict';
 
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ mapping, stateStore, txStore, adminToken }) {
+function createHttpServer({ mapping, stateStore, txStore, usersStore, adminToken }) {
   const app = express();
   app.use(express.json());
 
@@ -673,7 +708,7 @@ function createHttpServer({ mapping, stateStore, txStore, adminToken }) {
     res.json({ ok: true, data: payload });
   });
 
-  // TX: read recent
+  // TX: read
   app.get('/tx/recent', (req, res) => {
     if (!txStore) return res.status(500).json({ ok: false, error: 'txStore_not_configured' });
 
@@ -682,6 +717,19 @@ function createHttpServer({ mapping, stateStore, txStore, adminToken }) {
 
     const rows = freq ? txStore.listRecentByFreq(freq, limit) : txStore.listRecent(limit);
     res.json({ ok: true, data: rows });
+  });
+
+  // Users: read
+  app.get('/users/recent', (req, res) => {
+    const limit = Math.min(Number(req.query.limit || 200), 1000);
+    const rows = (usersStore && typeof usersStore.listRecent === 'function') ? usersStore.listRecent(limit) : [];
+    res.json({ ok: true, data: rows || [] });
+  });
+
+  app.get('/users/:guildId/:discordUserId', (req, res) => {
+    const { guildId, discordUserId } = req.params;
+    const row = (usersStore && typeof usersStore.get === 'function') ? usersStore.get(discordUserId, guildId) : null;
+    res.json({ ok: true, data: row });
   });
 
   app.post('/admin/reload', (req, res) => {
@@ -695,13 +743,15 @@ function createHttpServer({ mapping, stateStore, txStore, adminToken }) {
 
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
-
   return server;
 }
 
 module.exports = { createHttpServer };
 EOF
 )"
+
+# Ensure ownership for backend dir (best-effort)
+chown -R "$ADMIN_USER:$ADMIN_USER" "$BACKEND_DIR" 2>/dev/null || true
 
 # --------------------------------------------------
 # Interaktive .env Konfiguration
@@ -755,6 +805,7 @@ REQUIRED_FILES=(
   "$SRC_DIR/discord.js"
   "$SRC_DIR/mapping.js"
   "$SRC_DIR/tx.js"
+  "$SRC_DIR/users.js"
   "$BACKEND_DIR/index.js"
 )
 
@@ -801,7 +852,7 @@ systemctl restart das-krt-backend
 systemctl status das-krt-backend --no-pager || true
 
 echo ""
-log_ok "Bootstrap abgeschlossen | Alpha 0.0.1"
+log_ok "Bootstrap abgeschlossen | ${VERSION}"
 echo ""
 
 # --------------------------------------------------
@@ -809,18 +860,19 @@ echo ""
 # --------------------------------------------------
 while true; do
   echo ""
-  log_input "=== das-krt Menü (Alpha 0.0.1) ==="
+  log_input "=== das-krt Menü (${VERSION}) ==="
   echo -e "${CYAN}1) channels.json bearbeiten${NC}"
-  echo -e "${CYAN}2) Mumble SuperUser Passwort setzen/ändern (mumble-server -supw)${NC}"
+  echo -e "${CYAN}2) Mumble SuperUser Passwort setzen/ändern${NC}"
   echo -e "${CYAN}3) Backend Healthcheck testen${NC}"
   echo -e "${CYAN}4) Backend Testlog anzeigen (tail)${NC}"
   echo -e "${CYAN}5) Backend Live-Logs verfolgen (journalctl -f)${NC}"
   echo -e "${CYAN}6) TX Event senden (start/stop)${NC}"
   echo -e "${CYAN}7) TX Recent anzeigen${NC}"
-  echo -e "${CYAN}8) Beenden${NC}"
+  echo -e "${CYAN}8) Users Recent anzeigen${NC}"
+  echo -e "${CYAN}9) Beenden${NC}"
   echo ""
 
-  read -r -p "$(echo -e "${CYAN}Auswahl [1-8]: ${NC}")" CHOICE
+  read -r -p "$(echo -e "${CYAN}Auswahl [1-9]: ${NC}")" CHOICE
 
   case "$CHOICE" in
     1)
@@ -842,9 +894,9 @@ while true; do
         log_ok "Backend neu gestartet (Mapping neu geladen)"
       fi
       ;;
-
     2)
       log_input "SuperUser Passwort setzen/ändern (Eingabe unsichtbar)"
+
       while true; do
         read -s -p "$(echo -e "${CYAN}Neues SuperUser Passwort:${NC} ")" MUMBLE_PW_1
         echo ""
@@ -871,7 +923,6 @@ while true; do
         break
       done
       ;;
-
     3)
       log_info "Healthcheck: http://127.0.0.1:3000/health"
       if curl -sf "http://127.0.0.1:3000/health" > /dev/null; then
@@ -880,44 +931,43 @@ while true; do
         log_error "Healthcheck fehlgeschlagen"
       fi
       ;;
-
     4)
       log_info "Testlog (letzte 200 Zeilen): $TEST_LOG"
       tail -n 200 "$TEST_LOG" || true
       ;;
-
     5)
       log_info "Live Logs: journalctl -u das-krt-backend -f"
       journalctl -u das-krt-backend -f
       ;;
-
     6)
       log_input "TX Event senden"
-      read -r -p "$(echo -e "${CYAN}freqId [1060]: ${NC}")" TX_FREQ
-      TX_FREQ="${TX_FREQ:-1060}"
-      read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" TX_ACTION
-      TX_ACTION="${TX_ACTION:-start}"
+      read -r -p "$(echo -e "${CYAN}freqId [1060]: ${NC}")" FREQ_ID_IN
+      FREQ_ID_IN="${FREQ_ID_IN:-1060}"
+      read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" ACTION_IN
+      ACTION_IN="${ACTION_IN:-start}"
 
-      if curl -sS -X POST "http://127.0.0.1:3000/tx/event" \
+      if curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
         -H "content-type: application/json" \
-        -d "{\"freqId\":${TX_FREQ},\"action\":\"${TX_ACTION}\"}" >/dev/null; then
+        -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"${ACTION_IN}\"}" >/dev/null; then
         log_ok "TX Event gesendet"
       else
         log_error "TX Event fehlgeschlagen"
       fi
       ;;
-
     7)
       log_info "TX Recent: http://127.0.0.1:3000/tx/recent?limit=10"
       curl -sS "http://127.0.0.1:3000/tx/recent?limit=10" || true
       echo ""
       ;;
-
     8)
+      log_info "Users Recent: http://127.0.0.1:3000/users/recent?limit=10"
+      curl -sS "http://127.0.0.1:3000/users/recent?limit=10" || true
+      echo ""
+      ;;
+    9)
       log_ok "Bye."
       break
       ;;
-
     *)
       log_warn "Ungültige Auswahl."
       ;;

@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text;
 using Google.Protobuf;
+using Google.Protobuf.Reflection;
 
 namespace CompanionApp.Services;
 

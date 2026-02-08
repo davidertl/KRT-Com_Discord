@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# komplettes Installations-Skript für den das-KRT.com Server
+# Version Alpha 0.0.1
 set -euo pipefail
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten

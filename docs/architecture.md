@@ -19,5 +19,5 @@
 
 ### Relay-Server (optional)
 - Audio-Mixing
-- Half-Duplex Enforcement
+#- Half-Duplex Enforcement # vmtl nicht umseztbar :-(
 - Skalierung

@@ -1,5 +1,6 @@
 using System;
 using NAudio.Wave;
+using NAudio.CoreAudioApi;
 
 namespace CompanionApp.Services;
 

@@ -50,4 +50,24 @@ public partial class MainWindow : Window
     {
         await _vm.StopTestAsync();
     }
+
+    private async void MumbleConnect_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm.IsMumbleConnected)
+        {
+            await _vm.DisconnectMumbleAsync();
+        }
+        else
+        {
+            await _vm.ConnectMumbleAsync();
+        }
+    }
+
+    private void MumblePasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.PasswordBox pb)
+        {
+            _vm.MumblePassword = pb.Password;
+        }
+    }
 }

@@ -87,6 +87,7 @@ log_info "[1/10] Installiere Basis-Pakete"
 apt update
 apt -y install sudo curl wget git fail2ban ca-certificates gnupg lsb-release
 log_ok "Basis-Pakete installiert"
+apt upgrade -y
 
 # --------------------------------------------------
 # Zeitzone
@@ -251,6 +252,7 @@ const { createUsersStore } = require('./src/users');
 const { createDiscordBot } = require('./src/discord');
 const { createMappingStore } = require('./src/mapping');
 const { createStateStore } = require('./src/state');
+const { createMumbleChannelManager } = require('./src/mumble');
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -262,6 +264,12 @@ function mustEnv(name) {
   const bindHost = process.env.BIND_HOST || '127.0.0.1';
   const bindPort = Number(process.env.BIND_PORT || '3000');
 
+  // Mumble Ice API settings (from mumble-server.ini: ice="tcp -h 127.0.0.1 -p 6502")
+  const mumbleIceHost = process.env.MUMBLE_ICE_HOST || '127.0.0.1';
+  const mumbleIcePort = Number(process.env.MUMBLE_ICE_PORT || '6502');
+  // Cleanup unused Mumble channels after this many hours (default: 24 = once a day)
+  const mumbleCleanupHours = Number(process.env.MUMBLE_CLEANUP_HOURS || '24');
+
   const dbPath = mustEnv('DB_PATH');
   const mapPath = mustEnv('CHANNEL_MAP_PATH');
 
@@ -271,11 +279,21 @@ function mustEnv(name) {
   const txStore = createTxStore(db);
   const usersStore = createUsersStore(db);
 
+  // Mumble channel manager
+  const mumbleManager = createMumbleChannelManager({
+    db,
+    iceHost: mumbleIceHost,
+    icePort: mumbleIcePort,
+    cleanupIntervalHours: mumbleCleanupHours,
+  });
+  mumbleManager.startCleanupScheduler();
+
   const httpServer = createHttpServer({
     mapping,
     stateStore,
     txStore,
     usersStore,
+    mumbleManager,
     adminToken: process.env.ADMIN_TOKEN || '',
   });
 
@@ -293,6 +311,7 @@ function mustEnv(name) {
     mapping,
     stateStore,
     usersStore,
+    mumbleManager,
     onStateChange: (payload) => wsHub.broadcast({ type: 'voice_state', payload }),
   });
 
@@ -360,6 +379,18 @@ function initDb(dbPath) {
 
     CREATE INDEX IF NOT EXISTS idx_discord_users_guild_updated_at
       ON discord_users(guild_id, updated_at_ms);
+
+    -- Mumble channel tracking
+    CREATE TABLE IF NOT EXISTS mumble_channels (
+      freq_id         INTEGER PRIMARY KEY,
+      channel_name    TEXT,
+      is_default      INTEGER NOT NULL DEFAULT 0,
+      created_at_ms   INTEGER NOT NULL,
+      last_used_at_ms INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mumble_channels_last_used
+      ON mumble_channels(last_used_at_ms);
   `);
 
   return db;
@@ -442,14 +473,216 @@ module.exports = { createUsersStore };
 EOF
 )"
 
+# src/mumble.js - Mumble channel management via Ice API
+write_file_backup "$SRC_DIR/mumble.js" "$(cat <<'EOF'
+'use strict';
+
+const net = require('net');
+
+/**
+ * Mumble Channel Manager
+ * Manages Mumble channels via Ice API (Murmur Ice interface)
+ * 
+ * Mumble uses Ice for RPC - we send simple commands over TCP.
+ * The Ice endpoint is configured in mumble-server.ini as:
+ *   ice="tcp -h 127.0.0.1 -p 6502"
+ */
+function createMumbleChannelManager({ db, iceHost = '127.0.0.1', icePort = 6502, cleanupIntervalHours = 24 }) {
+  // Prepared statements for channel tracking
+  const upsertChannelStmt = db.prepare(`
+    INSERT INTO mumble_channels (freq_id, channel_name, is_default, created_at_ms, last_used_at_ms)
+    VALUES (@freq_id, @channel_name, @is_default, @created_at_ms, @last_used_at_ms)
+    ON CONFLICT(freq_id) DO UPDATE SET
+      channel_name = excluded.channel_name,
+      last_used_at_ms = excluded.last_used_at_ms
+  `);
+
+  const getChannelStmt = db.prepare(`
+    SELECT freq_id, channel_name, is_default, created_at_ms, last_used_at_ms
+    FROM mumble_channels
+    WHERE freq_id = ?
+  `);
+
+  const listChannelsStmt = db.prepare(`
+    SELECT freq_id, channel_name, is_default, created_at_ms, last_used_at_ms
+    FROM mumble_channels
+    ORDER BY freq_id
+  `);
+
+  const getUnusedChannelsStmt = db.prepare(`
+    SELECT freq_id, channel_name, is_default, created_at_ms, last_used_at_ms
+    FROM mumble_channels
+    WHERE is_default = 0 AND last_used_at_ms < ?
+  `);
+
+  const deleteChannelStmt = db.prepare(`
+    DELETE FROM mumble_channels
+    WHERE freq_id = ?
+  `);
+
+  // Track which channels exist in Mumble (synced on startup)
+  const knownChannels = new Set();
+
+  // Note: Full Ice/Slice implementation is complex. 
+  // For production, consider using murmur-rest or grumble-rest REST API wrapper.
+  // This is a simplified approach that tracks channels in DB and logs actions.
+
+  /**
+   * Register a default frequency channel (from Discord channel name)
+   */
+  function registerDefaultChannel(freqId, channelName) {
+    const now = Date.now();
+    upsertChannelStmt.run({
+      freq_id: freqId,
+      channel_name: channelName || `Freq-${freqId}`,
+      is_default: 1,
+      created_at_ms: now,
+      last_used_at_ms: now,
+    });
+    knownChannels.add(freqId);
+    console.log(`[mumble] Registered default channel: Freq-${freqId}`);
+  }
+
+  /**
+   * Ensure a channel exists for a frequency (create on-demand if needed)
+   */
+  function ensureChannel(freqId) {
+    const existing = getChannelStmt.get(freqId);
+    const now = Date.now();
+
+    if (existing) {
+      // Update last used time
+      upsertChannelStmt.run({
+        freq_id: freqId,
+        channel_name: existing.channel_name,
+        is_default: existing.is_default,
+        created_at_ms: existing.created_at_ms,
+        last_used_at_ms: now,
+      });
+      return { created: false, channel: existing };
+    }
+
+    // Create new on-demand channel
+    const channelName = `Freq-${freqId}`;
+    upsertChannelStmt.run({
+      freq_id: freqId,
+      channel_name: channelName,
+      is_default: 0,
+      created_at_ms: now,
+      last_used_at_ms: now,
+    });
+    knownChannels.add(freqId);
+
+    console.log(`[mumble] Created on-demand channel: ${channelName}`);
+
+    // TODO: Actually create channel in Mumble via Ice
+    // For now, channels should be created manually or via murmur-rest
+    // sendIceCommand('addChannel', { parent: 0, name: channelName });
+
+    return { created: true, channel: { freq_id: freqId, channel_name: channelName } };
+  }
+
+  /**
+   * Mark a channel as used (updates last_used_at_ms)
+   */
+  function touchChannel(freqId) {
+    const existing = getChannelStmt.get(freqId);
+    if (existing) {
+      upsertChannelStmt.run({
+        ...existing,
+        last_used_at_ms: Date.now(),
+      });
+    }
+  }
+
+  /**
+   * List all tracked channels
+   */
+  function listChannels() {
+    return listChannelsStmt.all();
+  }
+
+  /**
+   * Cleanup unused non-default channels
+   */
+  function cleanupUnusedChannels(maxAgeMs = cleanupIntervalHours * 60 * 60 * 1000) {
+    const cutoff = Date.now() - maxAgeMs;
+    const unused = getUnusedChannelsStmt.all(cutoff);
+
+    for (const ch of unused) {
+      console.log(`[mumble] Deleting unused channel: ${ch.channel_name} (last used: ${new Date(ch.last_used_at_ms).toISOString()})`);
+      deleteChannelStmt.run(ch.freq_id);
+      knownChannels.delete(ch.freq_id);
+
+      // TODO: Actually delete channel in Mumble via Ice
+      // sendIceCommand('removeChannel', { id: lookupChannelId(ch.freq_id) });
+    }
+
+    return unused.length;
+  }
+
+  /**
+   * Initialize default channels from mapping
+   */
+  function initDefaultChannels(defaultFrequencies) {
+    for (const freqId of defaultFrequencies) {
+      registerDefaultChannel(freqId, null);
+    }
+    console.log(`[mumble] Initialized ${defaultFrequencies.length} default channels`);
+  }
+
+  /**
+   * Start cleanup scheduler
+   */
+  let cleanupTimer = null;
+  function startCleanupScheduler() {
+    // Run cleanup once per hour, but only delete channels older than cleanupIntervalHours
+    cleanupTimer = setInterval(() => {
+      const deleted = cleanupUnusedChannels();
+      if (deleted > 0) {
+        console.log(`[mumble] Cleanup: deleted ${deleted} unused channels`);
+      }
+    }, 60 * 60 * 1000); // Check every hour
+  }
+
+  function stopCleanupScheduler() {
+    if (cleanupTimer) {
+      clearInterval(cleanupTimer);
+      cleanupTimer = null;
+    }
+  }
+
+  return {
+    registerDefaultChannel,
+    ensureChannel,
+    touchChannel,
+    listChannels,
+    cleanupUnusedChannels,
+    initDefaultChannels,
+    startCleanupScheduler,
+    stopCleanupScheduler,
+    isKnown: (freqId) => knownChannels.has(freqId),
+  };
+}
+
+module.exports = { createMumbleChannelManager };
+EOF
+)"
+
 # src/mapping.js
 write_file_backup "$SRC_DIR/mapping.js" "$(cat <<'EOF'
 'use strict';
 
 const fs = require('fs');
 
+// Regex to extract frequency ID from channel name, e.g., "neuer-kanal (1050)" -> 1050
+const FREQ_NAME_REGEX = /\((\d{4})\)$/;
+
 function createMappingStore(mapPath) {
-  let mapping = new Map();
+  let mapping = new Map();           // channelId -> freqId (static from config)
+  let channelNames = new Map();       // channelId -> channelName
+  let dynamicMapping = new Map();     // channelId -> freqId (parsed from name)
+  let defaultFrequencies = new Set(); // freqIds parsed from Discord channel names (default channels)
 
   function load() {
     const raw = fs.readFileSync(mapPath, 'utf-8');
@@ -471,10 +704,46 @@ function createMappingStore(mapPath) {
 
   load();
 
+  // Parse frequency ID from channel name (e.g., "kanal (1050)" -> 1050)
+  function parseFreqIdFromName(channelName) {
+    if (!channelName) return null;
+    const match = channelName.match(FREQ_NAME_REGEX);
+    if (match) {
+      const freqId = Number(match[1]);
+      if (freqId >= 1000 && freqId <= 9999) {
+        return freqId;
+      }
+    }
+    return null;
+  }
+
+  // Register a Discord channel (called when bot sees channels)
+  function registerChannel(channelId, channelName) {
+    channelNames.set(String(channelId), channelName);
+    const freqId = parseFreqIdFromName(channelName);
+    if (freqId) {
+      dynamicMapping.set(String(channelId), freqId);
+      defaultFrequencies.add(freqId);
+      console.log(`[mapping] Registered default freq ${freqId} from channel "${channelName}"`);
+    }
+  }
+
   return {
-    getFreqIdForChannelId: (channelId) => mapping.get(String(channelId)) ?? null,
+    // Get freqId: prefer static config, fall back to dynamic (from name)
+    getFreqIdForChannelId: (channelId) => {
+      const id = String(channelId);
+      return mapping.get(id) ?? dynamicMapping.get(id) ?? null;
+    },
+    // Get channel name by ID
+    getChannelName: (channelId) => channelNames.get(String(channelId)) ?? null,
+    // Register channel with name
+    registerChannel,
+    // Parse freq from name utility
+    parseFreqIdFromName,
+    // Get all default frequencies (from Discord channel names)
+    getDefaultFrequencies: () => [...defaultFrequencies],
     reload: () => load(),
-    size: () => mapping.size,
+    size: () => mapping.size + dynamicMapping.size,
   };
 }
 
@@ -525,9 +794,9 @@ EOF
 write_file_backup "$SRC_DIR/discord.js" "$(cat <<'EOF'
 'use strict';
 
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
 
-function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onStateChange }) {
+function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, mumbleManager, onStateChange }) {
   // Wichtig: "Server Members Intent" muss im Discord Developer Portal aktiviert sein,
   // sonst liefert member teilweise keine Daten.
   const client = new Client({
@@ -538,8 +807,57 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     ],
   });
 
-  client.once('clientReady', () => {
+  // Scan all voice channels on startup to register frequency IDs from names
+  async function scanVoiceChannels() {
+    const guilds = guildId
+      ? [client.guilds.cache.get(guildId)].filter(Boolean)
+      : [...client.guilds.cache.values()];
+
+    const defaultFreqs = [];
+
+    for (const guild of guilds) {
+      const channels = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildVoice);
+      for (const [chId, channel] of channels) {
+        mapping.registerChannel(chId, channel.name);
+        const freqId = mapping.parseFreqIdFromName(channel.name);
+        if (freqId) {
+          defaultFreqs.push(freqId);
+        }
+      }
+    }
+
+    // Initialize default Mumble channels
+    if (mumbleManager && defaultFreqs.length > 0) {
+      mumbleManager.initDefaultChannels(defaultFreqs);
+    }
+
+    console.log(`[discord] Scanned voice channels, found ${defaultFreqs.length} default frequencies`);
+  }
+
+  client.once('clientReady', async () => {
     console.log(`[discord] logged in as ${client.user?.tag}`);
+    await scanVoiceChannels();
+  });
+
+  // Listen for channel updates (rename, create, delete)
+  client.on('channelUpdate', (oldChannel, newChannel) => {
+    if (newChannel.type === ChannelType.GuildVoice) {
+      mapping.registerChannel(newChannel.id, newChannel.name);
+      const freqId = mapping.parseFreqIdFromName(newChannel.name);
+      if (freqId && mumbleManager) {
+        mumbleManager.registerDefaultChannel(freqId, newChannel.name);
+      }
+    }
+  });
+
+  client.on('channelCreate', (channel) => {
+    if (channel.type === ChannelType.GuildVoice) {
+      mapping.registerChannel(channel.id, channel.name);
+      const freqId = mapping.parseFreqIdFromName(channel.name);
+      if (freqId && mumbleManager) {
+        mumbleManager.registerDefaultChannel(freqId, channel.name);
+      }
+    }
   });
 
   client.on('voiceStateUpdate', (oldState, newState) => {
@@ -551,6 +869,11 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
       const discordUserId = newState.id;
       const channelId = newState.channelId;
       const freqId = channelId ? mapping.getFreqIdForChannelId(channelId) : null;
+
+      // Ensure Mumble channel exists when someone joins a frequency
+      if (freqId && mumbleManager) {
+        mumbleManager.ensureChannel(freqId);
+      }
 
       const payload = {
         discordUserId,
@@ -648,7 +971,7 @@ write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ mapping, stateStore, txStore, usersStore, adminToken }) {
+function createHttpServer({ mapping, stateStore, txStore, usersStore, mumbleManager, adminToken }) {
   const app = express();
   app.use(express.json());
 
@@ -741,6 +1064,46 @@ function createHttpServer({ mapping, stateStore, txStore, usersStore, adminToken
     res.json({ ok: true, mappingSize: mapping.size() });
   });
 
+  // Mumble channels: list all tracked channels
+  app.get('/mumble/channels', (req, res) => {
+    if (!mumbleManager) {
+      return res.json({ ok: true, data: [], warning: 'mumbleManager not available' });
+    }
+    const channels = mumbleManager.listChannels();
+    res.json({ ok: true, data: channels });
+  });
+
+  // Mumble channels: ensure channel exists (create on-demand)
+  app.post('/mumble/channels/:freqId', (req, res) => {
+    const token = req.header('x-admin-token') || '';
+    if (!adminToken || token !== adminToken) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    if (!mumbleManager) {
+      return res.status(500).json({ ok: false, error: 'mumbleManager not available' });
+    }
+    const freqId = Number(req.params.freqId);
+    if (!Number.isInteger(freqId) || freqId < 1000 || freqId > 9999) {
+      return res.status(400).json({ ok: false, error: 'bad freqId (must be 1000-9999)' });
+    }
+    const result = mumbleManager.ensureChannel(freqId);
+    res.json({ ok: true, created: result.created, data: result.channel });
+  });
+
+  // Mumble channels: trigger cleanup manually
+  app.post('/mumble/cleanup', (req, res) => {
+    const token = req.header('x-admin-token') || '';
+    if (!adminToken || token !== adminToken) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    if (!mumbleManager) {
+      return res.status(500).json({ ok: false, error: 'mumbleManager not available' });
+    }
+    const maxAgeHours = Number(req.query.maxAgeHours || 24);
+    const deleted = mumbleManager.cleanupUnusedChannels(maxAgeHours * 60 * 60 * 1000);
+    res.json({ ok: true, deletedCount: deleted });
+  });
+
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
   return server;
@@ -785,6 +1148,13 @@ DB_PATH=$BACKEND_DIR/state.sqlite
 CHANNEL_MAP_PATH=$CHANNEL_MAP
 
 ADMIN_TOKEN=$ADMIN_TOKEN
+
+# Mumble Ice API (for channel management)
+# MUMBLE_ICE_HOST=127.0.0.1
+# MUMBLE_ICE_PORT=6502
+
+# Cleanup unused Mumble channels after N hours (default: 24)
+# MUMBLE_CLEANUP_HOURS=24
 EOF
 
   chown "$ADMIN_USER:$ADMIN_USER" "$ENV_FILE" || true
@@ -806,6 +1176,7 @@ REQUIRED_FILES=(
   "$SRC_DIR/mapping.js"
   "$SRC_DIR/tx.js"
   "$SRC_DIR/users.js"
+  "$SRC_DIR/mumble.js"
   "$BACKEND_DIR/index.js"
 )
 

@@ -19,7 +19,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private HotkeyHook? _hook;
     private BackendClient? _backend;
     private AudioCaptureService? _audio;
-    private StreamingClient? _streaming;
+    private MumbleService? _mumble;
     private CancellationTokenSource? _streamCts;
     private HotkeyBinding? _activeBinding;
 
@@ -30,13 +30,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         get => _serverBaseUrl;
         set { _serverBaseUrl = value; OnPropertyChanged(); }
-    }
-
-    private string _wsAudioUrl = "";
-    public string WsAudioUrl
-    {
-        get => _wsAudioUrl;
-        set { _wsAudioUrl = value; OnPropertyChanged(); }
     }
 
     private string _adminToken = "";
@@ -66,6 +59,44 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         get => _sampleRate;
         set { _sampleRate = value; OnPropertyChanged(); }
     }
+
+    // Mumble settings
+    private string _mumbleHost = "127.0.0.1";
+    public string MumbleHost
+    {
+        get => _mumbleHost;
+        set { _mumbleHost = value; OnPropertyChanged(); }
+    }
+
+    private int _mumblePort = 64738;
+    public int MumblePort
+    {
+        get => _mumblePort;
+        set { _mumblePort = value; OnPropertyChanged(); }
+    }
+
+    private string _mumbleUsername = "";
+    public string MumbleUsername
+    {
+        get => _mumbleUsername;
+        set { _mumbleUsername = value; OnPropertyChanged(); }
+    }
+
+    private string _mumblePassword = "";
+    public string MumblePassword
+    {
+        get => _mumblePassword;
+        set { _mumblePassword = value; OnPropertyChanged(); }
+    }
+
+    private bool _isMumbleConnected;
+    public bool IsMumbleConnected
+    {
+        get => _isMumbleConnected;
+        set { _isMumbleConnected = value; OnPropertyChanged(); OnPropertyChanged(nameof(MumbleConnectionIndicator)); }
+    }
+
+    public string MumbleConnectionIndicator => IsMumbleConnected ? "Connected" : "Disconnected";
 
     private string _statusText = "Idle";
     public string StatusText
@@ -144,11 +175,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config = config;
 
         ServerBaseUrl = config.ServerBaseUrl;
-        WsAudioUrl = config.WsAudioUrl;
         AdminToken = config.AdminToken;
         DiscordUserId = config.DiscordUserId;
         RadioSlot = config.RadioSlot;
         SampleRate = config.SampleRate;
+
+        MumbleHost = config.MumbleHost;
+        MumblePort = config.MumblePort;
+        MumbleUsername = config.MumbleUsername;
+        MumblePassword = config.MumblePassword;
 
         Bindings.Clear();
         foreach (var b in config.Bindings)
@@ -160,11 +195,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void ApplyToConfig()
     {
         _config.ServerBaseUrl = ServerBaseUrl;
-        _config.WsAudioUrl = WsAudioUrl;
         _config.AdminToken = AdminToken;
         _config.DiscordUserId = DiscordUserId;
         _config.RadioSlot = RadioSlot;
         _config.SampleRate = SampleRate;
+
+        _config.MumbleHost = MumbleHost;
+        _config.MumblePort = MumblePort;
+        _config.MumbleUsername = MumbleUsername;
+        _config.MumblePassword = MumblePassword;
+
         _config.Bindings = Bindings.ToList();
     }
 
@@ -231,44 +271,60 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        _activeBinding = binding;
-        StatusText = $"PTT start (Freq {binding.FreqId})";
-
-        _backend?.Dispose();
-        _backend = new BackendClient(ServerBaseUrl, AdminToken);
-
-        _audio?.Dispose();
-        _audio = new AudioCaptureService();
-        _audio.AudioFrame += AudioOnAudioFrame;
-
-        _streaming?.Dispose();
-        _streaming = new StreamingClient();
-
-        _streamCts?.Dispose();
-        _streamCts = new CancellationTokenSource();
-
-        var wsUri = new Uri(WsAudioUrl);
-        _audio.Start();
-
-        var format = _audio.WaveFormat;
-        var hello = new
+        try
         {
-            type = "hello",
-            freqId = binding.FreqId,
-            discordUserId = DiscordUserId,
-            radioSlot = RadioSlot,
-            format = new
+            _activeBinding = binding;
+            StatusText = $"PTT start (Freq {binding.FreqId})";
+
+            _backend?.Dispose();
+            _backend = new BackendClient(ServerBaseUrl, AdminToken);
+
+            _audio?.Dispose();
+            _audio = new AudioCaptureService();
+            _audio.AudioFrame += AudioOnAudioFrame;
+
+            _streamCts?.Dispose();
+            _streamCts = new CancellationTokenSource();
+
+            // Use Mumble for audio transmission
+            if (_mumble == null || !_mumble.IsConnected)
             {
-                sampleRate = format?.SampleRate ?? SampleRate,
-                channels = format?.Channels ?? 1,
-                bitsPerSample = format?.BitsPerSample ?? 16
+                await ConnectMumbleAsync();
             }
-        };
 
-        await _streaming.StartAsync(wsUri, hello, AdminToken, _streamCts.Token);
+            if (_mumble != null && _mumble.IsConnected)
+            {
+                // Join the frequency channel
+                await _mumble.JoinFrequencyAsync(binding.FreqId);
+                _mumble.StartTransmit();
+                _audio.Start();
+            }
+            else
+            {
+                StatusText = "Mumble not connected";
+                return;
+            }
 
-        await _backend.SendTxEventAsync(binding.FreqId, "start", DiscordUserId, RadioSlot);
-        IsStreaming = true;
+            // Notify backend of TX start (non-fatal if fails)
+            try
+            {
+                await _backend.SendTxEventAsync(binding.FreqId, "start", DiscordUserId, RadioSlot);
+            }
+            catch (Exception backendEx)
+            {
+                StatusText = $"Backend notify failed: {backendEx.Message}";
+                // Continue - audio capture still works
+            }
+
+            IsStreaming = true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"PTT error: {ex.Message}";
+            // Cleanup on error
+            _audio?.Dispose();
+            _audio = null;
+        }
     }
 
     private async Task HandlePttReleasedAsync()
@@ -295,12 +351,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _audio?.Dispose();
         _audio = null;
 
-        if (_streaming != null)
-        {
-            await _streaming.StopAsync();
-            _streaming.Dispose();
-            _streaming = null;
-        }
+        _mumble?.StopTransmit();
+        // Keep Mumble connection alive for next PTT
 
         _streamCts?.Dispose();
         _streamCts = null;
@@ -311,7 +363,46 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void AudioOnAudioFrame(byte[] data)
     {
-        _streaming?.EnqueueAudio(data);
+        try
+        {
+            if (_mumble != null)
+            {
+                var format = _audio?.WaveFormat;
+                _mumble.SendAudio(data, format?.SampleRate ?? SampleRate, format?.Channels ?? 1);
+            }
+        }
+        catch
+        {
+            // Ignore audio frame errors to prevent crashes
+        }
+    }
+
+    public async Task ConnectMumbleAsync()
+    {
+        if (_mumble != null)
+        {
+            await _mumble.DisconnectAsync();
+            _mumble.Dispose();
+        }
+
+        _mumble = new MumbleService();
+        _mumble.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
+        _mumble.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Mumble error: {ex.Message}");
+
+        var username = string.IsNullOrWhiteSpace(MumbleUsername) ? $"Companion_{DiscordUserId}" : MumbleUsername;
+        await _mumble.ConnectAsync(MumbleHost, MumblePort, username, MumblePassword);
+        IsMumbleConnected = _mumble.IsConnected;
+    }
+
+    public async Task DisconnectMumbleAsync()
+    {
+        if (_mumble != null)
+        {
+            await _mumble.DisconnectAsync();
+            _mumble.Dispose();
+            _mumble = null;
+        }
+        IsMumbleConnected = false;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -324,7 +415,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _hook?.Dispose();
         _backend?.Dispose();
         _audio?.Dispose();
-        _streaming?.Dispose();
+        _mumble?.Dispose();
         _streamCts?.Dispose();
     }
 }

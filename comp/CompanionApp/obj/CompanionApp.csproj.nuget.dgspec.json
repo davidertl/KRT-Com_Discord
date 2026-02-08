@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj": {}
+    "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj": {}
   },
   "projects": {
-    "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj": {
+    "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
+        "projectUniqueName": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
         "projectName": "CompanionApp",
-        "projectPath": "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
+        "projectPath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
         "packagesPath": "C:\\Users\\micro\\.nuget\\packages\\",
-        "outputPath": "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\obj\\",
+        "outputPath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\micro\\AppData\\Roaming\\NuGet\\NuGet.Config"

@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "PPmWcEuGydM=",
+  "dgSpecHash": "nPVpOs7/ffM=",
   "success": true,
-  "projectFilePath": "c:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
+  "projectFilePath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\micro\\.nuget\\packages\\concentus\\1.1.7\\concentus.1.1.7.nupkg.sha512",
     "C:\\Users\\micro\\.nuget\\packages\\google.protobuf\\3.25.1\\google.protobuf.3.25.1.nupkg.sha512",

@@ -38,6 +38,10 @@ ENV_FILE="$BACKEND_DIR/.env"
 CHANNEL_MAP="$APP_ROOT/config/channels.json"
 TEST_LOG="$APP_ROOT/logs/backend-test.log"
 
+TRAEFIK_DIR="$APP_ROOT/traefik"
+TRAEFIK_VERSION="3.3.3"
+TRAEFIK_SERVICE_FILE="/etc/systemd/system/traefik.service"
+
 # --------------------------------------------------
 # Helper: Port check
 # --------------------------------------------------
@@ -86,7 +90,7 @@ write_file_backup() {
 # --------------------------------------------------
 # Basis-Pakete
 # --------------------------------------------------
-log_info "[1/10] Installiere Basis-Pakete"
+log_info "[1/12] Installiere Basis-Pakete"
 apt update
 apt -y install sudo curl wget git fail2ban ca-certificates gnupg lsb-release
 log_ok "Basis-Pakete installiert"
@@ -95,14 +99,14 @@ apt upgrade -y
 # --------------------------------------------------
 # Zeitzone
 # --------------------------------------------------
-log_info "[2/10] Setze Zeitzone"
+log_info "[2/12] Setze Zeitzone"
 timedatectl set-timezone Europe/Berlin
 log_ok "Zeitzone gesetzt: Europe/Berlin"
 
 # --------------------------------------------------
 # Admin-User (idempotent)
 # --------------------------------------------------
-log_info "[3/10] Erstelle Admin-User"
+log_info "[3/12] Erstelle Admin-User"
 if getent passwd "$ADMIN_USER" > /dev/null; then
   log_ok "User $ADMIN_USER existiert bereits"
 else
@@ -116,12 +120,12 @@ log_ok "User $ADMIN_USER in sudo Gruppe (sichergestellt)"
 # SSH-Härtung (optional)
 # Hinweis: du hast das bei dir absichtlich auskommentiert – bleibt so.
 # --------------------------------------------------
-log_info "[4/10] SSH-Härtung übersprungen (Script bewusst neutral halten)"
+log_info "[4/12] SSH-Härtung übersprungen (Script bewusst neutral halten)"
 
 # --------------------------------------------------
 # Fail2ban
 # --------------------------------------------------
-log_info "[5/10] Aktiviere Fail2ban"
+log_info "[5/12] Aktiviere Fail2ban"
 systemctl enable fail2ban >/dev/null 2>&1 || true
 systemctl start fail2ban >/dev/null 2>&1 || true
 log_ok "Fail2ban läuft (oder war bereits aktiv)"
@@ -129,10 +133,28 @@ log_ok "Fail2ban läuft (oder war bereits aktiv)"
 # --------------------------------------------------
 # Node.js 24
 # --------------------------------------------------
-log_info "[6/10] Installiere Node.js ${NODE_VERSION}"
+log_info "[6/12] Installiere Node.js ${NODE_VERSION}"
 curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
 apt -y install nodejs
 log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
+
+# --------------------------------------------------
+# Traefik Reverse Proxy
+# --------------------------------------------------
+log_info "[7/12] Installiere Traefik ${TRAEFIK_VERSION}"
+if command -v traefik &>/dev/null; then
+  log_ok "Traefik bereits installiert: $(traefik version --short 2>/dev/null || echo 'vorhanden')"
+else
+  cd /tmp
+  TRAEFIK_ARCH="amd64"
+  TRAEFIK_TAR="traefik_v${TRAEFIK_VERSION}_linux_${TRAEFIK_ARCH}.tar.gz"
+  wget -q "https://github.com/traefik/traefik/releases/download/v${TRAEFIK_VERSION}/${TRAEFIK_TAR}" -O "${TRAEFIK_TAR}"
+  tar xzf "${TRAEFIK_TAR}" traefik
+  mv traefik /usr/local/bin/traefik
+  chmod +x /usr/local/bin/traefik
+  rm -f "${TRAEFIK_TAR}"
+  log_ok "Traefik ${TRAEFIK_VERSION} installiert"
+fi
 
 # ==========================================================
 # PHASE 2: Project Structure & npm Dependencies
@@ -141,15 +163,15 @@ log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
 # --------------------------------------------------
 # Projektstruktur
 # --------------------------------------------------
-log_info "[7/10] Lege Projektverzeichnisse an"
-mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs" "$SRC_DIR"
+log_info "[8/12] Lege Projektverzeichnisse an"
+mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs" "$SRC_DIR" "$TRAEFIK_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$APP_ROOT" || true
 log_ok "Projektstruktur bereit: $APP_ROOT"
 
 # --------------------------------------------------
 # Backend Initialisierung (Dependencies)
 # --------------------------------------------------
-log_info "[8/10] Initialisiere Backend (npm)"
+log_info "[9/12] Initialisiere Backend (npm)"
 cd "$BACKEND_DIR"
 
 if [ ! -f package.json ]; then
@@ -166,7 +188,7 @@ log_ok "npm Dependencies installiert/aktualisiert"
 # --------------------------------------------------
 # systemd Service
 # --------------------------------------------------
-log_info "[9/10] Erstelle/Update systemd Service"
+log_info "[10/12] Erstelle/Update systemd Service"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=das-krt Backend (${VERSION})
@@ -223,11 +245,12 @@ Responsibility for operation, configuration, and legal compliance lies entirely 
 
 ## 2. Data Processed
 
-- **User Identifiers**: Discord display names (server nicknames only, changeable by user)
-- **Authentication**: Temporary signed tokens with automatic expiration
+- **User Identifiers**: Discord OAuth2 login (identify + guilds scopes). Discord access token is immediately revoked after use. Only server nicknames stored for display (changeable by user, no history kept).
+- **Authentication**: HMAC-SHA256 signed tokens with 24h automatic expiration. Debug login (POST /auth/login) disabled by default, only available in debug mode.
 - **Sessions**: Active connection state (ephemeral, cleared on restart)
 - **Logs**: Connection events, errors (configurable retention, no audio content)
 - **Audio**: Never recorded or stored - live transmission only
+- **Admin Token**: Not persisted by companion app (runtime-only, visible only in debug mode)
 
 ## 3. Data Retention
 
@@ -238,24 +261,32 @@ Retention periods are configurable by the server operator:
 
 ## 4. Data Deletion
 
-A hard delete removes all stored data for a user.
+A hard delete removes all stored data for a user (logs, sessions, tokens, mappings, policy acceptance).
 Deletion is irreversible. Deleted users are added to a ban list (ID + timestamp only) to prevent re-registration.
 
-## 5. Data Sharing
+## 5. Debugging
 
-No data is shared with third parties. No cloud services, no tracking, no statistics collection.
+Debug mode can be enabled by the server administrator. When active:
+- The companion app displays a visible warning
+- Manual login endpoint becomes available
+- DSGVO compliance mode is automatically disabled
+- Data retention extends to 7 days
 
-## 6. Server Operator Responsibility
+## 6. Data Sharing
 
-The server operator is responsible for log retention configuration, compliance with local data protection laws, and secure infrastructure operation.
+No data is shared with third parties. Discord API is contacted only for OAuth2 login (immediately revoked), guild member verification, and channel name synchronization.
 
-## 7. Open Source
+## 7. Server Operator Responsibility
+
+The server operator is responsible for log retention configuration, compliance with local data protection laws, secure infrastructure operation, and TLS/HTTPS configuration.
+
+## 8. Open Source
 
 The complete source code is publicly available and auditable.
 
-## 8. Changes
+## 9. Changes
 
-Any changes affecting data handling are documented in the changelog.
+Any changes affecting data handling are documented in the changelog and trigger a re-acceptance prompt in the companion app.
 POLICYEOF
   chown "$ADMIN_USER:$ADMIN_USER" "$PRIVACY_POLICY_FILE" 2>/dev/null || true
   log_ok "Privacy Policy erstellt: $PRIVACY_POLICY_FILE"
@@ -263,10 +294,156 @@ else
   log_ok "Privacy Policy existiert bereits: $PRIVACY_POLICY_FILE (nicht überschrieben)"
 fi
 
+# --------------------------------------------------
+# Traefik Konfiguration
+# --------------------------------------------------
+log_info "[11/12] Konfiguriere Traefik Reverse Proxy"
+
+# Ask for domain
+log_input ""
+log_input "=== Traefik / TLS Konfiguration ==="
+log_input "Für Let's Encrypt TLS muss eine Domain auf die Server-IP zeigen."
+log_input ""
+read -r -p "$(echo -e "${CYAN}Domain (z.B. das-krt.com, leer = kein TLS):${NC} ")" DOMAIN
+read -r -p "$(echo -e "${CYAN}E-Mail für Let's Encrypt Zertifikat:${NC} ")" ACME_EMAIL
+
+if [ -n "$DOMAIN" ]; then
+  ACME_EMAIL="${ACME_EMAIL:-admin@${DOMAIN}}"
+
+  # Static configuration
+  cat > "$TRAEFIK_DIR/traefik.yml" <<TRAEFIKEOF
+# Traefik static configuration — das-krt (${VERSION})
+# Auto-generated by install.sh
+
+api:
+  dashboard: false
+
+log:
+  level: WARN
+  filePath: "$APP_ROOT/logs/traefik.log"
+
+accessLog:
+  filePath: "$APP_ROOT/logs/traefik-access.log"
+  bufferingSize: 100
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
+        writeTimeout: 0
+        idleTimeout: 180s
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${ACME_EMAIL}
+      storage: ${TRAEFIK_DIR}/acme.json
+      httpChallenge:
+        entryPoint: web
+
+providers:
+  file:
+    filename: ${TRAEFIK_DIR}/routes.yml
+    watch: true
+TRAEFIKEOF
+
+  # Dynamic routes
+  cat > "$TRAEFIK_DIR/routes.yml" <<ROUTESEOF
+# Traefik dynamic configuration — das-krt (${VERSION})
+
+http:
+  routers:
+    das-krt:
+      rule: "Host(\`${DOMAIN}\`)"
+      entryPoints:
+        - websecure
+      service: backend
+      tls:
+        certResolver: letsencrypt
+
+    das-krt-http:
+      rule: "Host(\`${DOMAIN}\`)"
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-to-https
+      service: backend
+
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3000"
+        passHostHeader: true
+ROUTESEOF
+
+  # Ensure acme.json exists with correct permissions
+  touch "$TRAEFIK_DIR/acme.json"
+  chmod 600 "$TRAEFIK_DIR/acme.json"
+
+  # Traefik systemd service
+  cat > "$TRAEFIK_SERVICE_FILE" <<EOF
+[Unit]
+Description=Traefik Reverse Proxy (das-krt ${VERSION})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/traefik --configFile=${TRAEFIK_DIR}/traefik.yml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=${TRAEFIK_DIR} ${APP_ROOT}/logs
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chown -R "$ADMIN_USER:$ADMIN_USER" "$TRAEFIK_DIR" 2>/dev/null || true
+  # acme.json must be owned by root (Traefik runs as root for port 80/443 binding)
+  chown root:root "$TRAEFIK_DIR/acme.json" 2>/dev/null || true
+
+  systemctl daemon-reload
+  systemctl enable traefik >/dev/null 2>&1 || true
+  log_ok "Traefik konfiguriert für Domain: $DOMAIN"
+  log_ok "Traefik systemd Service erstellt und aktiviert"
+  log_ok "Let's Encrypt TLS mit HTTP-Challenge"
+else
+  log_warn "Keine Domain angegeben — Traefik wird NICHT konfiguriert"
+  log_warn "Ohne TLS ist kein sicherer Betrieb möglich (DSGVO Compliance eingeschränkt)"
+  DOMAIN=""
+fi
+
 # ==========================================================
 # PHASE 3: Backend Source Code Deployment
 # ==========================================================
-log_info "[10/10] Deploye Backend Source Code"
+log_info "[12/12] Deploye Backend Source Code"
 
 # index.js
 write_file_backup "$BACKEND_DIR/index.js" "$(cat <<'EOF'
@@ -365,7 +542,18 @@ function mustEnv(name) {
   voiceRelay.start();
 
   // Route WebSocket upgrades by path
+  // DSGVO HTTPS enforcement: reject WS upgrades that didn't come through TLS (Traefik)
   httpServer.on('upgrade', (req, socket, head) => {
+    const proto = (req.headers['x-forwarded-proto'] || '').toLowerCase();
+    if (dsgvo && typeof dsgvo.getStatus === 'function') {
+      const status = dsgvo.getStatus();
+      if (status.dsgvoEnabled && proto !== 'https') {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\nHTTPS required (DSGVO compliance)\r\n');
+        socket.destroy();
+        return;
+      }
+    }
+
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/voice') {
       voiceRelay.handleUpgrade(req, socket, head);
@@ -1793,6 +1981,26 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   const app = express();
   app.use(express.json());
 
+  // Trust proxy headers from Traefik (X-Forwarded-Proto, X-Forwarded-For)
+  app.set('trust proxy', 'loopback');
+
+  // DSGVO HTTPS enforcement: when DSGVO compliance mode is enabled,
+  // reject any request that did not arrive via HTTPS (through Traefik).
+  // Health endpoint is exempted so internal monitoring keeps working.
+  app.use((req, res, next) => {
+    if (req.path === '/health') return next();
+    if (dsgvo && typeof dsgvo.getStatus === 'function') {
+      const status = dsgvo.getStatus();
+      if (status.dsgvoEnabled && req.protocol !== 'https') {
+        return res.status(403).json({
+          ok: false,
+          error: 'HTTPS required — DSGVO compliance mode is active. Connect via https:// through the reverse proxy.'
+        });
+      }
+    }
+    next();
+  });
+
   const { signToken, verifyToken } = require('./crypto');
 
   let onTxEventFn = null;
@@ -2457,12 +2665,20 @@ if [[ "$CONFIGURE_ENV" =~ ^[jJ]$ ]]; then
   log_input "=== Discord OAuth2 (optional – für Login mit Discord) ==="
   log_input "Erstelle eine Application auf https://discord.com/developers/applications"
   log_input "Unter OAuth2 → Redirects muss die Redirect URI eingetragen sein."
-  log_input "Format: http://<IP-oder-Domain>:<Port>/auth/discord/callback"
+  if [ -n "${DOMAIN:-}" ]; then
+    log_input "Format: https://<Domain>/auth/discord/callback"
+  else
+    log_input "Format: http://<IP-oder-Domain>:<Port>/auth/discord/callback"
+  fi
   log_input ""
   read -r -p "$(echo -e "${CYAN}Discord Client ID (Application ID, leer = kein OAuth):${NC} ")" DISCORD_CLIENT_ID
   if [ -n "$DISCORD_CLIENT_ID" ]; then
     read -s -p "$(echo -e "${CYAN}Discord Client Secret:${NC} ")" DISCORD_CLIENT_SECRET; echo ""
-    local DEFAULT_REDIRECT="http://${BIND_HOST}:${BIND_PORT}/auth/discord/callback"
+    if [ -n "${DOMAIN:-}" ]; then
+      DEFAULT_REDIRECT="https://${DOMAIN}/auth/discord/callback"
+    else
+      DEFAULT_REDIRECT="http://${BIND_HOST}:${BIND_PORT}/auth/discord/callback"
+    fi
     read -r -p "$(echo -e "${CYAN}Discord Redirect URI [${DEFAULT_REDIRECT}]:${NC} ")" DISCORD_REDIRECT_URI
     DISCORD_REDIRECT_URI="${DISCORD_REDIRECT_URI:-$DEFAULT_REDIRECT}"
   else
@@ -2476,6 +2692,7 @@ $([ -n "$DISCORD_GUILD_ID" ] && echo "DISCORD_GUILD_ID=$DISCORD_GUILD_ID" || ech
 
 BIND_HOST=$BIND_HOST
 BIND_PORT=$BIND_PORT
+$([ -n "${DOMAIN:-}" ] && echo "DOMAIN=$DOMAIN" || echo "# DOMAIN=your-domain.com")
 
 DB_PATH=$BACKEND_DIR/state.sqlite
 CHANNEL_MAP_PATH=$CHANNEL_MAP
@@ -2564,14 +2781,34 @@ else
   sleep 1
 fi
 
-# systemd Service starten
-log_info "Starte/Restart systemd Service"
+# systemd Services starten
+log_info "Starte/Restart systemd Services"
 systemctl restart das-krt-backend
 systemctl status das-krt-backend --no-pager || true
+
+if [ -f "$TRAEFIK_SERVICE_FILE" ]; then
+  log_info "Starte/Restart Traefik"
+  systemctl restart traefik
+  sleep 2
+  if systemctl is-active --quiet traefik; then
+    log_ok "Traefik läuft"
+    if [ -n "${DOMAIN:-}" ]; then
+      log_info "TLS-Zertifikat wird automatisch per Let's Encrypt bezogen"
+      log_info "Erreichbar unter: https://${DOMAIN}"
+    fi
+  else
+    log_warn "Traefik konnte nicht gestartet werden"
+    systemctl status traefik --no-pager || true
+  fi
+fi
 
 echo ""
 log_ok "Installation abgeschlossen | ${VERSION}"
 echo ""
 log_info "Verwende service.sh für Start/Stop/Restart und Tools:"
 log_info "  bash service.sh start|stop|restart|status|menu"
+if [ -n "${DOMAIN:-}" ]; then
+  log_info "  Backend erreichbar: https://${DOMAIN}"
+  log_info "  OAuth2 Redirect:    https://${DOMAIN}/auth/discord/callback"
+fi
 echo ""

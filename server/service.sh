@@ -33,6 +33,8 @@ BACKEND_DIR="$APP_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
 CHANNEL_MAP="$APP_ROOT/config/channels.json"
 TEST_LOG="$APP_ROOT/logs/backend-test.log"
+TRAEFIK_SERVICE="traefik"
+TRAEFIK_DIR="$APP_ROOT/traefik"
 
 # --------------------------------------------------
 # Service Commands
@@ -519,6 +521,123 @@ do_delete_and_ban() {
 }
 
 # --------------------------------------------------
+# Traefik Reverse Proxy Management
+# --------------------------------------------------
+do_traefik_status() {
+  echo ""
+  if ! systemctl list-unit-files "$TRAEFIK_SERVICE.service" &>/dev/null 2>&1; then
+    log_warn "Traefik ist nicht installiert"
+    return
+  fi
+
+  systemctl status "$TRAEFIK_SERVICE" --no-pager || true
+  echo ""
+
+  # Check if TLS cert exists
+  if [ -f "$TRAEFIK_DIR/acme.json" ]; then
+    local ACME_SIZE
+    ACME_SIZE="$(stat -c%s "$TRAEFIK_DIR/acme.json" 2>/dev/null || echo 0)"
+    if [ "$ACME_SIZE" -gt 10 ]; then
+      log_ok "TLS Zertifikat: vorhanden (acme.json: ${ACME_SIZE} Bytes)"
+    else
+      log_warn "TLS Zertifikat: noch nicht bezogen (acme.json leer)"
+    fi
+  fi
+
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -n "$CUR_DOMAIN" ]; then
+    log_info "Domain: $CUR_DOMAIN"
+    log_info "URL:    https://$CUR_DOMAIN"
+  else
+    log_warn "Keine Domain in .env konfiguriert"
+  fi
+  echo ""
+}
+
+do_traefik_restart() {
+  if ! systemctl list-unit-files "$TRAEFIK_SERVICE.service" &>/dev/null 2>&1; then
+    log_warn "Traefik ist nicht installiert"
+    return
+  fi
+
+  log_info "Restarte Traefik ..."
+  systemctl restart "$TRAEFIK_SERVICE"
+  sleep 1
+  if systemctl is-active --quiet "$TRAEFIK_SERVICE"; then
+    log_ok "Traefik neu gestartet"
+  else
+    log_error "Traefik konnte nicht gestartet werden"
+    systemctl status "$TRAEFIK_SERVICE" --no-pager || true
+  fi
+}
+
+do_traefik_logs() {
+  log_info "Traefik Live Logs:"
+  journalctl -u "$TRAEFIK_SERVICE" -f
+}
+
+do_traefik_update_domain() {
+  echo ""
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  log_info "Aktuelle Domain: ${CUR_DOMAIN:-(nicht gesetzt)}"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Neue Domain (z.B. das-krt.com):${NC} ")" NEW_DOMAIN
+  if [ -z "$NEW_DOMAIN" ]; then
+    log_warn "Keine Domain eingegeben"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}E-Mail für Let's Encrypt [admin@${NEW_DOMAIN}]:${NC} ")" NEW_EMAIL
+  NEW_EMAIL="${NEW_EMAIL:-admin@${NEW_DOMAIN}}"
+
+  # Update .env
+  sed -i '/^#\?\s*DOMAIN=/d' "$ENV_FILE"
+  echo "DOMAIN=$NEW_DOMAIN" >> "$ENV_FILE"
+
+  # Update Traefik routes
+  if [ -f "$TRAEFIK_DIR/routes.yml" ]; then
+    sed -i "s/Host(\`[^)]*\`)/Host(\`${NEW_DOMAIN}\`)/" "$TRAEFIK_DIR/routes.yml"
+    log_ok "Traefik routes.yml aktualisiert"
+  fi
+
+  # Update Traefik static config (email)
+  if [ -f "$TRAEFIK_DIR/traefik.yml" ]; then
+    sed -i "s/email: .*/email: ${NEW_EMAIL}/" "$TRAEFIK_DIR/traefik.yml"
+    log_ok "Traefik traefik.yml aktualisiert (E-Mail: ${NEW_EMAIL})"
+  fi
+
+  # Update redirect URI if it uses old domain
+  local CUR_REDIRECT
+  CUR_REDIRECT="$(grep -E '^DISCORD_REDIRECT_URI=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -n "$CUR_REDIRECT" ] && [ -n "$CUR_DOMAIN" ]; then
+    local NEW_REDIRECT="${CUR_REDIRECT//$CUR_DOMAIN/$NEW_DOMAIN}"
+    sed -i "s|^DISCORD_REDIRECT_URI=.*|DISCORD_REDIRECT_URI=$NEW_REDIRECT|" "$ENV_FILE"
+    log_ok "OAuth2 Redirect URI aktualisiert: $NEW_REDIRECT"
+    log_warn "Vergiss nicht, die Redirect URI auch im Discord Developer Portal zu ändern!"
+  fi
+
+  log_ok "Domain auf $NEW_DOMAIN geändert"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Traefik und Backend jetzt neustarten? (j/n): ${NC}")" DO_RESTART
+  if [[ "$DO_RESTART" =~ ^[jJ]$ ]]; then
+    # Reset acme.json for new domain cert
+    if [ -f "$TRAEFIK_DIR/acme.json" ]; then
+      echo "{}" > "$TRAEFIK_DIR/acme.json"
+      chmod 600 "$TRAEFIK_DIR/acme.json"
+      log_info "acme.json zurückgesetzt für neues Zertifikat"
+    fi
+    do_traefik_restart
+    do_restart
+  else
+    log_warn "Änderungen werden erst nach einem Neustart wirksam"
+  fi
+}
+
+# --------------------------------------------------
 # OAuth2 Credentials Update
 # --------------------------------------------------
 do_update_oauth() {
@@ -678,6 +797,11 @@ do_menu() {
     echo -e "${CYAN}--- Security ---${NC}"
     echo -e "${CYAN}50) Debug-Login an/aus (POST /auth/login)${NC}"
     echo -e "${CYAN}51) Discord OAuth2 Zugangsdaten ändern${NC}"
+    echo -e "${CYAN}--- Traefik (Reverse Proxy / TLS) ---${NC}"
+    echo -e "${CYAN}60) Traefik Status & TLS Zertifikat${NC}"
+    echo -e "${CYAN}61) Traefik neustarten${NC}"
+    echo -e "${CYAN}62) Traefik Live-Logs${NC}"
+    echo -e "${CYAN}63) Domain ändern${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -805,6 +929,20 @@ do_menu() {
         ;;
       51)
         do_update_oauth
+        ;;
+
+      # --- Traefik ---
+      60)
+        do_traefik_status
+        ;;
+      61)
+        do_traefik_restart
+        ;;
+      62)
+        do_traefik_logs
+        ;;
+      63)
+        do_traefik_update_domain
         ;;
 
       0)

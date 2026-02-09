@@ -15,4 +15,4 @@
 
 ## Kann
 - Subgruppen via Hash
-- Externe Statusanzeige (z. B. Mumble)
+- Externe Statusanzeige

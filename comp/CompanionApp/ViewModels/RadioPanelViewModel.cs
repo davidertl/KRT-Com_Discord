@@ -33,6 +33,7 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     private string _freqInput = "";
     private int _freqId = 1000;
     private string _hotkey = "";
+    private string _channelName = "";
     private int _volume = 100;
     private int _balance = 50; // 0 = left, 50 = center, 100 = right
     private RadioStatus _status = RadioStatus.Idle;
@@ -113,6 +114,18 @@ public class RadioPanelViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Discord channel name associated with this frequency (if any).
+    /// Displayed below the frequency in the UI.
+    /// </summary>
+    public string ChannelName
+    {
+        get => _channelName;
+        set { _channelName = value ?? ""; OnPropertyChanged(); OnPropertyChanged(nameof(HasChannelName)); }
+    }
+
+    public bool HasChannelName => !string.IsNullOrEmpty(_channelName);
+
     public string Hotkey
     {
         get => _hotkey;
@@ -135,8 +148,8 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     {
         get
         {
-            if (_balance < 45) return $"L{50 - _balance}";
-            if (_balance > 55) return $"R{_balance - 50}";
+            if (_balance < 45) return $"L{(int)Math.Round((50 - _balance) * 2.0)}";
+            if (_balance > 55) return $"R{(int)Math.Round((_balance - 50) * 2.0)}";
             return "C";
         }
     }

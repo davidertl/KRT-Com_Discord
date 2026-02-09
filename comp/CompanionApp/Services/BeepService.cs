@@ -14,6 +14,7 @@ public class BeepService : IDisposable
     private WasapiOut? _waveOut;
     private string _outputDeviceName = "Default";
     private bool _enabled = true;
+    private float _masterVolume = 1.0f;
 
     // Beep frequencies and durations
     private const int TxStartFreq = 800;      // Hz
@@ -31,6 +32,11 @@ public class BeepService : IDisposable
     public void SetOutputDevice(string deviceName)
     {
         _outputDeviceName = deviceName;
+    }
+
+    public void SetMasterVolume(float volume)
+    {
+        _masterVolume = Math.Clamp(volume, 0f, 1.25f);
     }
 
     public void PlayTxStartBeep()
@@ -68,6 +74,41 @@ public class BeepService : IDisposable
         PlayBeep(TxStartFreq, 60);
     }
 
+    /// <summary>
+    /// Emergency TX start - ascending two-tone alert
+    /// </summary>
+    public async void PlayEmergencyTxBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1200, 70);
+        await System.Threading.Tasks.Task.Delay(50);
+        PlayBeep(1500, 70);
+    }
+
+    /// <summary>
+    /// Emergency TX end - descending two-tone
+    /// </summary>
+    public async void PlayEmergencyTxEndBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1200, 70);
+        await System.Threading.Tasks.Task.Delay(50);
+        PlayBeep(900, 70);
+    }
+
+    /// <summary>
+    /// Emergency RX start - triple-pulse alert
+    /// </summary>
+    public async void PlayEmergencyRxBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1400, 50);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1400, 50);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1400, 50);
+    }
+
     private void PlayBeep(int frequency, int durationMs)
     {
         try
@@ -100,7 +141,7 @@ public class BeepService : IDisposable
 
             var volumeProvider = new VolumeSampleProvider(provider.ToSampleProvider())
             {
-                Volume = 0.5f
+                Volume = 0.5f * _masterVolume
             };
 
             // Find the output device

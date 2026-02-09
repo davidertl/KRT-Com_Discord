@@ -1,6 +1,7 @@
 <Window x:Class="CompanionApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:util="clr-namespace:CompanionApp.Utilities"
         Title="das-KRT Companion" Height="750" Width="950"
         MinHeight="650" MinWidth="850"
         WindowStartupLocation="CenterScreen"
@@ -148,6 +149,8 @@
 
     <!-- Boolean to Visibility Converter -->
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    <util:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis"/>
+    <util:StringToVisibilityConverter x:Key="StringToVis"/>
   </Window.Resources>
 
   <Grid>
@@ -170,14 +173,14 @@
               <Style TargetType="Ellipse">
                 <Setter Property="Fill" Value="{StaticResource AccentRed}"/>
                 <Style.Triggers>
-                  <DataTrigger Binding="{Binding IsMumbleConnected}" Value="True">
+                  <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                     <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
                   </DataTrigger>
                 </Style.Triggers>
               </Style>
             </Ellipse.Style>
           </Ellipse>
-          <TextBlock Text="{Binding MumbleConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
+          <TextBlock Text="{Binding VoiceConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
                      VerticalAlignment="Center" Margin="0,0,20,0"/>
           <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource TextSecondary}" 
                      VerticalAlignment="Center" MaxWidth="400" TextTrimming="CharacterEllipsis"/>
@@ -213,9 +216,9 @@
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
 
-                  <!-- Mute Checkbox -->
-                  <CheckBox Grid.Column="0" IsChecked="{Binding EmergencyRadio.IsMuted}" VerticalAlignment="Center" 
-                            Margin="0,0,8,0" ToolTip="Mute this radio"/>
+                  <!-- Enable Checkbox -->
+                  <CheckBox Grid.Column="0" IsChecked="{Binding EmergencyRadio.IsEnabled}" VerticalAlignment="Center" 
+                            Margin="0,0,8,0" ToolTip="Enable emergency radio"/>
 
                   <!-- Status Arrows -->
                   <StackPanel Grid.Column="1" VerticalAlignment="Center" Width="30" Margin="0,0,12,0">
@@ -230,8 +233,13 @@
                     <TextBlock Text="EMERGENCY" FontWeight="Bold" FontSize="14" 
                                Foreground="{StaticResource EmergencyBorder}" Margin="0,0,0,6"/>
                     <Border Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
-                      <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
-                                 Foreground="{StaticResource FreqDisplayText}"/>
+                      <StackPanel>
+                        <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
+                                   Foreground="{StaticResource FreqDisplayText}"/>
+                        <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
+                                   Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                      </StackPanel>
                     </Border>
                   </StackPanel>
 
@@ -292,7 +300,6 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
                           </Grid.ColumnDefinitions>
 
                           <!-- Status Arrows -->
@@ -318,30 +325,36 @@
                                        VerticalAlignment="Center" Margin="4,0,0,0"/>
                           </StackPanel>
 
-                          <!-- Mute Checkbox -->
-                          <CheckBox Grid.Column="4" IsChecked="{Binding IsMuted}" VerticalAlignment="Center" Margin="8,0,0,0"
-                                    ToolTip="Mute this radio" Content="🔇"/>
-
-                          <!-- Broadcast Checkbox (Advanced Mode Only) -->
-                          <CheckBox Grid.Column="5" Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
-                                    ToolTip="Include in Talk To All broadcast" Margin="8,0,0,0"
-                                    Visibility="{Binding ShowBroadcastCheckbox, Converter={StaticResource BoolToVis}}"/>
+                          <!-- Mute + Broadcast stacked -->
+                          <StackPanel Grid.Column="4" VerticalAlignment="Center">
+                            <CheckBox IsChecked="{Binding IsMuted}" Margin="0,0,0,2"
+                                      ToolTip="Mute this radio" Content="🔇"/>
+                            <CheckBox Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
+                                      ToolTip="Include in Talk To All broadcast"
+                                      Visibility="{Binding ShowBroadcastCheckbox, Converter={StaticResource BoolToVis}}"/>
+                          </StackPanel>
                         </Grid>
 
                         <!-- Frequency Display -->
                         <Border Grid.Row="1" Background="{StaticResource FreqDisplayBg}" CornerRadius="4" 
                                 Padding="12,8" Margin="0,0,0,8">
-                          <Grid>
-                            <Grid.ColumnDefinitions>
-                              <ColumnDefinition Width="*"/>
-                              <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="{Binding FrequencyDisplay}" 
-                                       FontFamily="Consolas" FontSize="28" FontWeight="Bold"
-                                       Foreground="{StaticResource FreqDisplayText}" VerticalAlignment="Center"/>
-                            <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
-                                     Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
-                          </Grid>
+                          <StackPanel>
+                            <Grid>
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                              </Grid.ColumnDefinitions>
+                              <TextBlock Grid.Column="0" Text="{Binding FrequencyDisplay}" 
+                                         FontFamily="Consolas" FontSize="28" FontWeight="Bold"
+                                         Foreground="{StaticResource FreqDisplayText}" VerticalAlignment="Center"/>
+                              <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
+                                       Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Channel name from Discord (shown when available) -->
+                            <TextBlock Text="{Binding ChannelName}" FontSize="11" FontStyle="Italic"
+                                       Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                          </StackPanel>
                         </Border>
 
                         <!-- Volume and Balance Row -->
@@ -600,11 +613,16 @@
                 <TextBlock Text="Log file:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
                 <TextBlock Text="{Binding DebugLogFilePath}" Foreground="{StaticResource TextSecondary}" 
                            FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                <CheckBox Content="    Deactivate all radios except Emergency" Foreground="{StaticResource TextSecondary}" 
-                          IsChecked="{Binding DeactivateRadiosOnAutoConnect}" Margin="20,0,0,10"
-                          IsEnabled="{Binding AutoConnect}"/>
                 <CheckBox Content="Enable Emergency Radio" Foreground="{StaticResource TextSecondary}" 
-                          IsChecked="{Binding EnableEmergencyRadio}"/>
+                          IsChecked="{Binding EnableEmergencyRadio}" Margin="0,0,0,15"/>
+                
+                <TextBlock Text="Startup" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                <CheckBox Content="Save active state from radios for next startup" Foreground="{StaticResource TextSecondary}" 
+                          IsChecked="{Binding SaveRadioActiveState}" Margin="0,0,0,10"
+                          ToolTip="When enabled, radios remember their on/off state between sessions"/>
+                <CheckBox Content="Turn on Emergency radio on startup" Foreground="{StaticResource TextSecondary}" 
+                          IsChecked="{Binding TurnOnEmergencyOnStartup}" Margin="0,0,0,10"
+                          IsEnabled="{Binding EnableEmergencyRadio}"/>
               </StackPanel>
             </Border>
 
@@ -614,11 +632,31 @@
                 
                 <TextBlock Text="Input Device (Microphone)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox ItemsSource="{Binding AudioInputDevices}" SelectedValue="{Binding SelectedAudioInputDevice}" 
-                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <Grid Margin="0,0,0,15">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="45"/>
+                  </Grid.ColumnDefinitions>
+                  <Slider Grid.Column="0" Minimum="0" Maximum="125" Value="{Binding InputVolume}" 
+                          VerticalAlignment="Center" ToolTip="Input volume (0-125%)"/>
+                  <TextBlock Grid.Column="1" Text="{Binding InputVolumeText}" Foreground="{StaticResource TextSecondary}" 
+                             VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12"/>
+                </Grid>
 
                 <TextBlock Text="Output Device (Speakers)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox ItemsSource="{Binding AudioOutputDevices}" SelectedValue="{Binding SelectedAudioOutputDevice}" 
-                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <Grid Margin="0,0,0,15">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="45"/>
+                  </Grid.ColumnDefinitions>
+                  <Slider Grid.Column="0" Minimum="0" Maximum="125" Value="{Binding OutputVolume}" 
+                          VerticalAlignment="Center" ToolTip="Output volume (0-125%)"/>
+                  <TextBlock Grid.Column="1" Text="{Binding OutputVolumeText}" Foreground="{StaticResource TextSecondary}" 
+                             VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12"/>
+                </Grid>
 
                 <TextBlock Text="Sample Rate" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox Width="150" HorizontalAlignment="Left">
@@ -638,76 +676,190 @@
             <TextBlock Text="Server Connection" Foreground="{StaticResource TextPrimary}" 
                        FontSize="18" FontWeight="SemiBold" Margin="0,0,0,20"/>
 
-            <!-- Mumble Server with Discord Auth -->
+            <!-- Voice Server -->
             <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
               <StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
-                  <TextBlock Text="Mumble Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold"/>
+                  <TextBlock Text="Voice Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold"/>
                   <Ellipse Width="10" Height="10" Margin="15,0,6,0" VerticalAlignment="Center">
                     <Ellipse.Style>
                       <Style TargetType="Ellipse">
                         <Setter Property="Fill" Value="{StaticResource AccentRed}"/>
                         <Style.Triggers>
-                          <DataTrigger Binding="{Binding IsMumbleConnected}" Value="True">
+                          <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                             <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
                           </DataTrigger>
                         </Style.Triggers>
                       </Style>
                     </Ellipse.Style>
                   </Ellipse>
-                  <TextBlock Text="{Binding MumbleConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
+                  <TextBlock Text="{Binding VoiceConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
                              VerticalAlignment="Center"/>
                 </StackPanel>
                 
-                <Grid Margin="0,0,0,15">
+                <!-- Host + Port + Verify Button Row -->
+                <Grid Margin="0,0,0,10">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
                   <StackPanel Grid.Column="0" Margin="0,0,10,0">
                     <TextBlock Text="Host" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding MumbleHost, UpdateSourceTrigger=PropertyChanged}" 
+                    <TextBox Text="{Binding VoiceHost, UpdateSourceTrigger=PropertyChanged}" 
                              Style="{StaticResource ModernTextBox}"/>
                   </StackPanel>
-                  <StackPanel Grid.Column="1">
+                  <StackPanel Grid.Column="1" Margin="0,0,10,0">
                     <TextBlock Text="Port" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding MumblePort, UpdateSourceTrigger=PropertyChanged}" 
+                    <TextBox Text="{Binding VoicePort, UpdateSourceTrigger=PropertyChanged}" 
                              Style="{StaticResource ModernTextBox}"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" VerticalAlignment="Bottom">
+                    <Button Content="Verify" Style="{StaticResource ModernButton}" 
+                            Click="Verify_Click" Width="80" ToolTip="Fetch server status and privacy policy"/>
                   </StackPanel>
                 </Grid>
 
-                <!-- Discord Authentication -->
-                <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,15">
-                  <StackPanel>
-                    <TextBlock Text="Authentication" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold" Margin="0,0,0,10"/>
-                    
-                    <Button Content="Login with Discord" Style="{StaticResource ModernButton}" 
-                            HorizontalAlignment="Left" Margin="0,0,0,12" IsEnabled="False"
-                            ToolTip="Coming soon - Discord OAuth login"/>
-                    
-                    <TextBlock Text="Discord User ID:" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding DiscordUserId, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
+                <!-- Verify Status Text -->
+                <TextBlock Text="{Binding VerifyStatusText}" Foreground="{StaticResource TextSecondary}" 
+                           FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"/>
 
-                    <TextBlock Text="Guild ID (Discord Server):" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding GuildId, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}"/>
+                <!-- Server Status Info (shown after verification) -->
+                <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,10"
+                        Visibility="{Binding IsServerVerified, Converter={StaticResource BoolToVis}}">
+                  <StackPanel>
+                    <TextBlock Text="Server Status" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    
+                    <Grid Margin="0,0,0,6">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="Version:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                      <TextBlock Grid.Column="1" Text="{Binding ServerVersion}" Foreground="{StaticResource TextPrimary}" FontSize="11"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,6">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="DSGVO Mode:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                      <TextBlock Grid.Column="1" Text="{Binding DsgvoStatusText}" Foreground="{Binding DsgvoStatusColor}" FontSize="11" FontWeight="SemiBold"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,6">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="Debug Mode:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                      <TextBlock Grid.Column="1" Text="{Binding DebugModeStatusText}" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,4">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="Retention:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                      <TextBlock Grid.Column="1" Text="{Binding ServerRetentionDays, StringFormat={}{0} days}" 
+                                 Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                    </Grid>
+
+                    <!-- DSGVO disabled warning -->
+                    <Border Background="#3A2020" CornerRadius="4" Padding="8" Margin="0,8,0,0">
+                      <Border.Style>
+                        <Style TargetType="Border">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding ServerDsgvoEnabled}" Value="False">
+                              <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Border.Style>
+                      <TextBlock Text="Warning: DSGVO compliance mode is DISABLED on this server. Your data may not be automatically deleted."
+                                 Foreground="{StaticResource AccentRed}" FontSize="11" TextWrapping="Wrap"/>
+                    </Border>
                   </StackPanel>
                 </Border>
 
-                <Button Content="{Binding MumbleConnectButtonText}" Style="{StaticResource ModernButton}" 
-                        Click="MumbleConnect_Click" HorizontalAlignment="Left"/>
+                <!-- Privacy Policy Section (shown after verification) -->
+                <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,10"
+                        Visibility="{Binding IsServerVerified, Converter={StaticResource BoolToVis}}">
+                  <StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                      <TextBlock Text="Privacy Policy" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
+                      <TextBlock Text="{Binding ServerPolicyVersion, StringFormat=' (v{0})'}" 
+                                 Foreground="{StaticResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <Border Background="#1A1A2A" CornerRadius="4" Padding="10" MaxHeight="200">
+                      <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <TextBlock Text="{Binding PrivacyPolicyText}" Foreground="{StaticResource TextSecondary}" 
+                                   FontSize="11" TextWrapping="Wrap"/>
+                      </ScrollViewer>
+                    </Border>
+
+                    <!-- Accept / Already Accepted -->
+                    <StackPanel Margin="0,10,0,0">
+                      <StackPanel Orientation="Horizontal" 
+                                  Visibility="{Binding PolicyAccepted, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="✓ Privacy policy accepted" Foreground="{StaticResource AccentGreen}" FontSize="12"/>
+                      </StackPanel>
+                      <Button Content="I have read and accept the Privacy Policy" Style="{StaticResource ModernButton}"
+                              Click="AcceptPolicy_Click"
+                              Visibility="{Binding PolicyNeedsAcceptance, Converter={StaticResource BoolToVis}}"
+                              HorizontalAlignment="Left"/>
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+
+                <!-- Discord Login (shown after server verification) -->
+                <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,15"
+                        Visibility="{Binding ServerVerifiedVisibility}">
+                  <StackPanel>
+                    <TextBlock Text="Authentication" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    
+                    <!-- Logged-in display -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8"
+                                Visibility="{Binding IsLoggedIn, Converter={StaticResource BoolToVis}}">
+                      <TextBlock Text="✓ Logged in as " Foreground="{StaticResource AccentGreen}" FontSize="12"/>
+                      <TextBlock Text="{Binding LoggedInDisplayName}" Foreground="{StaticResource AccentGreen}" FontSize="12" FontWeight="SemiBold"/>
+                    </StackPanel>
+
+                    <!-- Hint when button is disabled -->
+                    <TextBlock Text="{Binding DiscordLoginHint}" Foreground="#FF8866" FontSize="11" Margin="0,0,0,8"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding CanLoginWithDiscord, Converter={StaticResource InverseBoolToVis}}"/>
+
+                    <!-- OAuth login status -->
+                    <TextBlock Text="{Binding OAuthLoginStatus}" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,8"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding OAuthLoginStatus, Converter={StaticResource StringToVis}}"/>
+
+                    <!-- Login with Discord button -->
+                    <Button Content="Login with Discord" Style="{StaticResource ModernButton}"
+                            Click="LoginWithDiscord_Click"
+                            IsEnabled="{Binding CanLoginWithDiscord}"
+                            HorizontalAlignment="Left" Margin="0,0,0,8"/>
+
+                    <!-- Voice connect/disconnect -->
+                    <Button Content="{Binding VoiceConnectButtonText}" Style="{StaticResource ModernButton}" 
+                            Click="VoiceConnect_Click" HorizontalAlignment="Left"
+                            Visibility="{Binding IsLoggedIn, Converter={StaticResource BoolToVis}}"
+                            IsEnabled="{Binding IsLoggedIn}"/>
+                  </StackPanel>
+                </Border>
               </StackPanel>
             </Border>
 
-            <!-- Backend Server -->
-            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20">
+            <!-- Debug Settings (only visible when server debug mode is active) -->
+            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20"
+                    Visibility="{Binding ServerDebugMode, Converter={StaticResource BoolToVis}}">
               <StackPanel>
-                <TextBlock Text="Backend Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,15"/>
-                
-                <TextBlock Text="Server Base URL" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                <TextBox Text="{Binding ServerBaseUrl, UpdateSourceTrigger=PropertyChanged}" 
-                         Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
+                <TextBlock Text="Debug Settings" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,15"/>
 
                 <TextBlock Text="Admin Token" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <TextBox Text="{Binding AdminToken, UpdateSourceTrigger=PropertyChanged}" 

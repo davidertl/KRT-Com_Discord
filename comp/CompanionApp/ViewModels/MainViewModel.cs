@@ -21,7 +21,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private HotkeyHook? _hook;
     private BackendClient? _backend;
     private AudioCaptureService? _audio;
-    private MumbleService? _mumble;
+    private VoiceService? _voice;
     private BeepService? _beepService;
     private CancellationTokenSource? _streamCts;
     private RadioPanelViewModel? _activeRadio;
@@ -44,13 +44,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<HotkeyBinding> Bindings { get; } = new();
 
     #region Server Settings
-
-    private string _serverBaseUrl = "";
-    public string ServerBaseUrl
-    {
-        get => _serverBaseUrl;
-        set { _serverBaseUrl = value; OnPropertyChanged(); }
-    }
 
     private string _adminToken = "";
     public string AdminToken
@@ -80,50 +73,170 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _sampleRate = value; OnPropertyChanged(); }
     }
 
-    // Mumble settings
-    private string _mumbleHost = "127.0.0.1";
-    public string MumbleHost
+    // Voice server settings
+    private string _voiceHost = "127.0.0.1";
+    public string VoiceHost
     {
-        get => _mumbleHost;
-        set { _mumbleHost = value; OnPropertyChanged(); }
+        get => _voiceHost;
+        set { _voiceHost = value; OnPropertyChanged(); }
     }
 
-    private int _mumblePort = 64738;
-    public int MumblePort
+    private int _voicePort = 3000;
+    public int VoicePort
     {
-        get => _mumblePort;
-        set { _mumblePort = value; OnPropertyChanged(); }
+        get => _voicePort;
+        set { _voicePort = value; OnPropertyChanged(); }
     }
 
-    private string _mumbleUsername = "";
-    public string MumbleUsername
+    // Auth token from last login
+    private string _authToken = "";
+    public string AuthToken
     {
-        get => _mumbleUsername;
-        set { _mumbleUsername = value; OnPropertyChanged(); }
+        get => _authToken;
+        set { _authToken = value; OnPropertyChanged(); }
     }
 
-    private string _mumblePassword = "";
-    public string MumblePassword
+    // Accepted policy version
+    private string _acceptedPolicyVersion = "";
+
+    #endregion
+
+    #region Server Verification
+
+    private bool _isServerVerified;
+    public bool IsServerVerified
     {
-        get => _mumblePassword;
-        set { _mumblePassword = value; OnPropertyChanged(); }
+        get => _isServerVerified;
+        set { _isServerVerified = value; OnPropertyChanged(); OnPropertyChanged(nameof(ServerVerifiedVisibility)); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
     }
 
-    private bool _isMumbleConnected;
-    public bool IsMumbleConnected
+    public Visibility ServerVerifiedVisibility => IsServerVerified ? Visibility.Visible : Visibility.Collapsed;
+
+    private string _serverVersion = "";
+    public string ServerVersion
     {
-        get => _isMumbleConnected;
-        set 
-        { 
-            _isMumbleConnected = value; 
-            OnPropertyChanged(); 
-            OnPropertyChanged(nameof(MumbleConnectionIndicator)); 
-            OnPropertyChanged(nameof(MumbleConnectButtonText));
+        get => _serverVersion;
+        set { _serverVersion = value; OnPropertyChanged(); }
+    }
+
+    private bool _serverDsgvoEnabled;
+    public bool ServerDsgvoEnabled
+    {
+        get => _serverDsgvoEnabled;
+        set { _serverDsgvoEnabled = value; OnPropertyChanged(); OnPropertyChanged(nameof(DsgvoStatusText)); OnPropertyChanged(nameof(DsgvoStatusColor)); }
+    }
+
+    private bool _serverDebugMode;
+    public bool ServerDebugMode
+    {
+        get => _serverDebugMode;
+        set { _serverDebugMode = value; OnPropertyChanged(); OnPropertyChanged(nameof(DebugModeStatusText)); }
+    }
+
+    private int _serverRetentionDays;
+    public int ServerRetentionDays
+    {
+        get => _serverRetentionDays;
+        set { _serverRetentionDays = value; OnPropertyChanged(); }
+    }
+
+    private string _serverPolicyVersion = "";
+    public string ServerPolicyVersion
+    {
+        get => _serverPolicyVersion;
+        set { _serverPolicyVersion = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); }
+    }
+
+    private string _privacyPolicyText = "";
+    public string PrivacyPolicyText
+    {
+        get => _privacyPolicyText;
+        set { _privacyPolicyText = value; OnPropertyChanged(); }
+    }
+
+    private bool _policyAccepted;
+    public bool PolicyAccepted
+    {
+        get => _policyAccepted;
+        set { _policyAccepted = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
+    }
+
+    public bool PolicyNeedsAcceptance => IsServerVerified && !PolicyAccepted;
+    public bool CanLogin => IsServerVerified && PolicyAccepted;
+
+    private bool _oauthEnabled;
+    public bool OauthEnabled
+    {
+        get => _oauthEnabled;
+        set { _oauthEnabled = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
+    }
+
+    /// <summary>True when user can click "Login with Discord".</summary>
+    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress;
+
+    /// <summary>Hint text shown when button is disabled.</summary>
+    public string DiscordLoginHint
+    {
+        get
+        {
+            if (!IsServerVerified) return "";
+            if (!OauthEnabled) return "Server does not have Discord OAuth configured.";
+            if (!PolicyAccepted) return "Accept the privacy policy to enable login.";
+            if (_isOAuthInProgress) return "Login in progress…";
+            return "";
         }
     }
 
-    public string MumbleConnectionIndicator => IsMumbleConnected ? "Connected" : "Disconnected";
-    public string MumbleConnectButtonText => IsMumbleConnected ? "Disconnect" : "Connect";
+    private bool _isOAuthInProgress;
+    public bool IsOAuthInProgress
+    {
+        get => _isOAuthInProgress;
+        set { _isOAuthInProgress = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
+    }
+
+    private string _oauthLoginStatus = "";
+    public string OAuthLoginStatus
+    {
+        get => _oauthLoginStatus;
+        set { _oauthLoginStatus = value; OnPropertyChanged(); }
+    }
+
+    private string _loggedInDisplayName = "";
+    public string LoggedInDisplayName
+    {
+        get => _loggedInDisplayName;
+        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); }
+    }
+
+    public bool IsLoggedIn => !string.IsNullOrEmpty(LoggedInDisplayName);
+
+    public string DsgvoStatusText => ServerDsgvoEnabled ? "DSGVO: Enabled" : "DSGVO: Disabled";
+    public string DsgvoStatusColor => ServerDsgvoEnabled ? "#4AFF9E" : "#FF4A4A";
+    public string DebugModeStatusText => ServerDebugMode ? "Debug: Active" : "Debug: Off";
+
+    private string _verifyStatusText = "";
+    public string VerifyStatusText
+    {
+        get => _verifyStatusText;
+        set { _verifyStatusText = value; OnPropertyChanged(); }
+    }
+
+    private bool _isVoiceConnected;
+    public bool IsVoiceConnected
+    {
+        get => _isVoiceConnected;
+        set 
+        { 
+            _isVoiceConnected = value; 
+            OnPropertyChanged(); 
+            OnPropertyChanged(nameof(VoiceConnectionIndicator)); 
+            OnPropertyChanged(nameof(VoiceConnectButtonText));
+            OnPropertyChanged(nameof(CanLogin));
+        }
+    }
+
+    public string VoiceConnectionIndicator => IsVoiceConnected ? "Connected" : "Disconnected";
+    public string VoiceConnectButtonText => IsVoiceConnected ? "Disconnect" : "Connect";
 
     #endregion
 
@@ -179,11 +292,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _autoConnect = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
 
-    private bool _deactivateRadiosOnAutoConnect;
-    public bool DeactivateRadiosOnAutoConnect
+    private bool _saveRadioActiveState = true;
+    public bool SaveRadioActiveState
     {
-        get => _deactivateRadiosOnAutoConnect;
-        set { _deactivateRadiosOnAutoConnect = value; OnPropertyChanged(); MarkGlobalChanged(); }
+        get => _saveRadioActiveState;
+        set { _saveRadioActiveState = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _turnOnEmergencyOnStartup = true;
+    public bool TurnOnEmergencyOnStartup
+    {
+        get => _turnOnEmergencyOnStartup;
+        set { _turnOnEmergencyOnStartup = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
 
     private bool _enableEmergencyRadio = true;
@@ -196,6 +316,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged();
             OnPropertyChanged(nameof(EmergencyRadioVisibility));
             MarkGlobalChanged();
+            PushRadioSettingsToVoice(EmergencyRadio);
+            _ = PushServerMuteAsync(EmergencyRadio);
+            _ = HandleEmergencyRadioToggleAsync();
         }
     }
 
@@ -246,6 +369,39 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _toggleMuteAllHotkey = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
 
+    // Master input volume (0-125, default 100)
+    private int _inputVolume = 100;
+    public int InputVolume
+    {
+        get => _inputVolume;
+        set 
+        { 
+            _inputVolume = Math.Clamp(value, 0, 125); 
+            OnPropertyChanged(); 
+            OnPropertyChanged(nameof(InputVolumeText));
+            MarkGlobalChanged();
+            _voice?.SetMasterInputVolume(_inputVolume / 100f);
+        }
+    }
+    public string InputVolumeText => $"{_inputVolume}%";
+
+    // Master output volume (0-125, default 100)
+    private int _outputVolume = 100;
+    public int OutputVolume
+    {
+        get => _outputVolume;
+        set 
+        { 
+            _outputVolume = Math.Clamp(value, 0, 125); 
+            OnPropertyChanged(); 
+            OnPropertyChanged(nameof(OutputVolumeText));
+            MarkGlobalChanged();
+            _voice?.SetMasterOutputVolume(_outputVolume / 100f);
+            _beepService?.SetMasterVolume(_outputVolume / 100f);
+        }
+    }
+    public string OutputVolumeText => $"{_outputVolume}%";
+
     private bool _allRadiosMuted;
     public bool AllRadiosMuted
     {
@@ -274,7 +430,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(); 
             MarkGlobalChanged();
             _beepService?.SetOutputDevice(value);
-            _mumble?.SetOutputDevice(value);
+            _voice?.SetOutputDevice(value);
         }
     }
 
@@ -334,6 +490,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         // Initialize beep service
         _beepService = new BeepService();
+        _beepService.SetMasterVolume(_outputVolume / 100f);
 
         // Initialize 8 radio panels with default names
         for (int i = 0; i < 8; i++)
@@ -347,11 +504,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 AdvancedMode = false
             };
             panel.UnsavedChangesOccurred += MarkGlobalChanged;
+            panel.PropertyChanged += OnRadioPanelPropertyChanged;
             RadioPanels.Add(panel);
         }
 
         // Set up emergency radio
         EmergencyRadio.UnsavedChangesOccurred += MarkGlobalChanged;
+        EmergencyRadio.PropertyChanged += OnRadioPanelPropertyChanged;
 
         // Load audio devices
         LoadAudioDevices();
@@ -402,8 +561,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         if (AutoConnect)
         {
-            // Deactivate all radios except Emergency if option is set
-            if (DeactivateRadiosOnAutoConnect)
+            // If NOT saving active state, turn all radios off on startup
+            if (!SaveRadioActiveState)
             {
                 foreach (var panel in RadioPanels)
                 {
@@ -411,9 +570,22 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 }
             }
 
+            // If "Turn on Emergency on startup" is set, enable it
+            if (TurnOnEmergencyOnStartup)
+            {
+                EmergencyRadio.IsEnabled = true;
+            }
+
             try
             {
-                await ConnectMumbleAsync();
+                // Auto-verify server first
+                await VerifyServerAsync();
+
+                // If we have a saved auth token and policy is accepted, auto-connect
+                if (IsServerVerified && PolicyAccepted && !string.IsNullOrWhiteSpace(AuthToken))
+                {
+                    await ConnectVoiceAsync();
+                }
             }
             catch
             {
@@ -459,6 +631,205 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             Arguments = folder,
             UseShellExecute = true
         });
+    }
+
+    /// <summary>
+    /// Verify server connection: fetch server status and privacy policy.
+    /// Called when user clicks the "Verify" button.
+    /// </summary>
+    public async Task VerifyServerAsync()
+    {
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            VerifyStatusText = "Please enter host and port first";
+            return;
+        }
+
+        VerifyStatusText = "Verifying server...";
+        IsServerVerified = false;
+        PolicyAccepted = false;
+
+        try
+        {
+            var status = await BackendClient.GetServerStatusAsync(baseUrl);
+            if (status == null)
+            {
+                VerifyStatusText = "Server not reachable or invalid response";
+                return;
+            }
+
+            ServerVersion = status.Version;
+            ServerDsgvoEnabled = status.DsgvoEnabled;
+            ServerDebugMode = status.DebugMode;
+            ServerRetentionDays = status.RetentionDays;
+            ServerPolicyVersion = status.PolicyVersion;
+            OauthEnabled = status.OauthEnabled;
+
+            var policy = await BackendClient.GetPrivacyPolicyAsync(baseUrl);
+            PrivacyPolicyText = policy?.Text ?? "Could not fetch privacy policy.";
+
+            // Check if user already accepted this policy version
+            if (_acceptedPolicyVersion == ServerPolicyVersion)
+            {
+                PolicyAccepted = true;
+            }
+
+            IsServerVerified = true;
+            VerifyStatusText = $"Server verified: {status.Version}";
+            LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode} oauth={status.OauthEnabled}");
+        }
+        catch (Exception ex)
+        {
+            VerifyStatusText = $"Verification failed: {ex.Message}";
+            LogDebug($"[Verify] Failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Accept the privacy policy for the current server policy version.
+    /// </summary>
+    public async Task AcceptPolicyAsync()
+    {
+        _acceptedPolicyVersion = ServerPolicyVersion;
+        PolicyAccepted = true;
+        MarkGlobalChanged();
+
+        // If we already have an auth token, notify the server
+        if (!string.IsNullOrWhiteSpace(AuthToken))
+        {
+            try
+            {
+                var baseUrl = BuildBaseUrl();
+                using var client = new BackendClient(baseUrl, AdminToken);
+                client.SetAuthToken(AuthToken);
+                await client.AcceptPolicyAsync(ServerPolicyVersion);
+                LogDebug($"[Policy] Accepted policy version {ServerPolicyVersion} on server");
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"[Policy] Server accept failed: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Login via Discord OAuth2. Opens browser, polls for token.
+    /// </summary>
+    public async Task<bool> LoginWithDiscordAsync()
+    {
+        if (!IsServerVerified)
+        {
+            OAuthLoginStatus = "Please verify the server first";
+            return false;
+        }
+
+        if (!PolicyAccepted)
+        {
+            OAuthLoginStatus = "Please accept the privacy policy first";
+            return false;
+        }
+
+        if (!OauthEnabled)
+        {
+            OAuthLoginStatus = "Server does not have Discord OAuth configured";
+            return false;
+        }
+
+        IsOAuthInProgress = true;
+        OAuthLoginStatus = "Opening browser for Discord login…";
+
+        var baseUrl = BuildBaseUrl();
+        var state = Guid.NewGuid().ToString("N");
+
+        try
+        {
+            // Open browser to backend's OAuth redirect endpoint
+            var redirectUrl = $"{baseUrl}/auth/discord/redirect?state={Uri.EscapeDataString(state)}";
+            Process.Start(new ProcessStartInfo(redirectUrl) { UseShellExecute = true });
+
+            // Poll for result (every 2 seconds, up to 3 minutes)
+            OAuthLoginStatus = "Waiting for Discord authorization…";
+            var timeout = DateTime.UtcNow.AddMinutes(3);
+
+            while (DateTime.UtcNow < timeout)
+            {
+                await Task.Delay(2000);
+
+                var result = await BackendClient.PollOAuthTokenAsync(baseUrl, state);
+                if (result == null) continue;
+
+                if (result.Status == "pending") continue;
+
+                if (result.Status == "error")
+                {
+                    var errorMsg = result.Error switch
+                    {
+                        "not_in_guild" => "You are not a member of the allowed Discord server.",
+                        "no_guild" => "No matching guilds found.",
+                        "banned" => "Your account has been banned.",
+                        _ => $"Login error: {result.Error}"
+                    };
+                    OAuthLoginStatus = errorMsg;
+                    LogDebug($"[OAuth] Error: {result.Error}");
+                    return false;
+                }
+
+                if (result.Status == "success" && !string.IsNullOrEmpty(result.Token))
+                {
+                    AuthToken = result.Token;
+                    LoggedInDisplayName = result.DisplayName ?? "";
+
+                    // Accept policy on server if needed
+                    if (!result.PolicyAccepted && !string.IsNullOrEmpty(AuthToken))
+                    {
+                        using var client = new BackendClient(baseUrl, AdminToken);
+                        client.SetAuthToken(AuthToken);
+                        await client.AcceptPolicyAsync(result.PolicyVersion ?? ServerPolicyVersion);
+                    }
+
+                    OAuthLoginStatus = $"Logged in as {LoggedInDisplayName}";
+                    StatusText = $"Logged in as {LoggedInDisplayName}";
+                    LogDebug($"[OAuth] Login OK: {LoggedInDisplayName}");
+                    MarkGlobalChanged();
+
+                    // Auto-connect voice
+                    await ConnectVoiceAsync();
+                    return true;
+                }
+
+                if (result.Status == "unknown")
+                {
+                    // State expired or was never registered
+                    OAuthLoginStatus = "Login session expired. Please try again.";
+                    return false;
+                }
+            }
+
+            OAuthLoginStatus = "Login timed out. Please try again.";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            OAuthLoginStatus = $"Login error: {ex.Message}";
+            LogDebug($"[OAuth] Error: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            IsOAuthInProgress = false;
+        }
+    }
+
+    private string BuildBaseUrl()
+    {
+        if (string.IsNullOrWhiteSpace(VoiceHost)) return "";
+        var scheme = VoiceHost.StartsWith("https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+        var cleanHost = VoiceHost
+            .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
+            .TrimEnd('/');
+        return $"{scheme}://{cleanHost}:{VoicePort}";
     }
 
     public async Task StartTestAsync()
@@ -518,15 +889,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             StatusText = $"Broadcasting to {broadcastRadios.Count} radios";
 
-            // Connect to Mumble if needed
-            if (_mumble == null || !_mumble.IsConnected)
+            // Connect to voice server if needed
+            if (_voice == null || !_voice.IsConnected)
             {
-                await ConnectMumbleAsync();
+                await ConnectVoiceAsync();
             }
 
-            if (_mumble == null || !_mumble.IsConnected)
+            if (_voice == null || !_voice.IsConnected)
             {
-                StatusText = "Mumble not connected - broadcast failed";
+                StatusText = "Voice not connected - broadcast failed";
                 foreach (var radio in broadcastRadios)
                 {
                     radio.SetBroadcasting(false);
@@ -538,8 +909,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             // Start transmitting to first radio's frequency (broadcasts will go to all)
             var firstRadio = broadcastRadios.First();
-            await _mumble.JoinFrequencyAsync(firstRadio.FreqId);
-            _mumble.StartTransmit();
+            await _voice.JoinFrequencyAsync(firstRadio.FreqId);
+            _voice.StartTransmit();
 
             // Start audio capture
             _audio?.Dispose();
@@ -582,7 +953,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _audio?.Dispose();
         _audio = null;
 
-        _mumble?.StopTransmit();
+        _voice?.StopTransmit();
 
         IsBroadcasting = false;
         IsStreaming = false;
@@ -678,20 +1049,23 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _config = config;
 
-        ServerBaseUrl = config.ServerBaseUrl;
-        AdminToken = config.AdminToken;
         DiscordUserId = config.DiscordUserId;
         GuildId = config.GuildId;
         SampleRate = config.SampleRate;
 
-        MumbleHost = config.MumbleHost;
-        MumblePort = config.MumblePort;
-        MumbleUsername = config.MumbleUsername;
-        MumblePassword = config.MumblePassword;
+        VoiceHost = config.VoiceHost;
+        VoicePort = config.VoicePort;
+
+        AuthToken = config.AuthToken;
+        _acceptedPolicyVersion = config.AcceptedPolicyVersion;
 
         AutoConnect = config.AutoConnect;
-        DeactivateRadiosOnAutoConnect = config.DeactivateRadiosOnAutoConnect;
+        SaveRadioActiveState = config.SaveRadioActiveState;
+        TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup;
+        EnableEmergencyRadio = config.EnableEmergencyRadio;
         DebugLoggingEnabled = config.DebugLoggingEnabled;
+        InputVolume = config.InputVolume;
+        OutputVolume = config.OutputVolume;
 
         // Load bindings into radio panels
         for (int i = 0; i < RadioPanels.Count && i < config.Bindings.Count; i++)
@@ -702,6 +1076,28 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             panel.FreqId = binding.FreqId;
             panel.Hotkey = binding.Hotkey;
             panel.Label = string.IsNullOrWhiteSpace(binding.Label) ? panel.Label : binding.Label;
+        }
+
+        // Restore per-radio state (volume, balance, muted, broadcast)
+        foreach (var state in config.RadioStates)
+        {
+            if (state.Index >= 0 && state.Index < RadioPanels.Count)
+            {
+                var panel = RadioPanels[state.Index];
+                panel.Volume = state.Volume;
+                panel.Balance = state.Balance;
+                panel.IsMuted = state.IsMuted;
+                panel.IncludedInBroadcast = state.IncludedInBroadcast;
+            }
+        }
+
+        // Restore emergency radio state
+        if (config.EmergencyRadioState != null)
+        {
+            EmergencyRadio.Volume = config.EmergencyRadioState.Volume;
+            EmergencyRadio.Balance = config.EmergencyRadioState.Balance;
+            EmergencyRadio.IsMuted = config.EmergencyRadioState.IsMuted;
+            EmergencyRadio.IsEnabled = config.EmergencyRadioState.IsEnabled;
         }
 
         Bindings.Clear();
@@ -781,22 +1177,45 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyToConfig()
     {
-        _config.ServerBaseUrl = ServerBaseUrl;
-        _config.AdminToken = AdminToken;
         _config.DiscordUserId = DiscordUserId;
         _config.GuildId = GuildId;
         _config.SampleRate = SampleRate;
 
-        _config.MumbleHost = MumbleHost;
-        _config.MumblePort = MumblePort;
-        _config.MumbleUsername = MumbleUsername;
-        _config.MumblePassword = MumblePassword;
+        _config.VoiceHost = VoiceHost;
+        _config.VoicePort = VoicePort;
+
+        _config.AuthToken = AuthToken;
+        _config.AcceptedPolicyVersion = _acceptedPolicyVersion;
 
         _config.AutoConnect = AutoConnect;
-        _config.DeactivateRadiosOnAutoConnect = DeactivateRadiosOnAutoConnect;
+        _config.SaveRadioActiveState = SaveRadioActiveState;
+        _config.TurnOnEmergencyOnStartup = TurnOnEmergencyOnStartup;
+        _config.EnableEmergencyRadio = EnableEmergencyRadio;
         _config.DebugLoggingEnabled = DebugLoggingEnabled;
+        _config.InputVolume = InputVolume;
+        _config.OutputVolume = OutputVolume;
 
         _config.Bindings = Bindings.ToList();
+
+        // Save per-radio state
+        _config.RadioStates = RadioPanels.Select(p => new Models.RadioState
+        {
+            Index = p.Index,
+            IsEnabled = p.IsEnabled,
+            IsMuted = p.IsMuted,
+            Volume = p.Volume,
+            Balance = p.Balance,
+            IncludedInBroadcast = p.IncludedInBroadcast
+        }).ToList();
+
+        _config.EmergencyRadioState = new Models.RadioState
+        {
+            Index = -1,
+            IsEnabled = EmergencyRadio.IsEnabled,
+            IsMuted = EmergencyRadio.IsMuted,
+            Volume = EmergencyRadio.Volume,
+            Balance = EmergencyRadio.Balance
+        };
     }
 
     private readonly object _debugLogLock = new();
@@ -842,14 +1261,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task SyncFreqNamesAsync()
     {
-        if (string.IsNullOrWhiteSpace(ServerBaseUrl) || string.IsNullOrWhiteSpace(AdminToken))
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(AdminToken))
         {
             return;
         }
 
         try
         {
-            using var client = new BackendClient(ServerBaseUrl, AdminToken);
+            using var client = new BackendClient(baseUrl, AdminToken);
             var entries = RadioPanels
                 .Where(r => r.FreqId >= 1000 && r.FreqId <= 9999)
                 .Select(r => new { r.FreqId, Name = r.Label.Trim() })
@@ -905,6 +1325,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             // Check Emergency radio
             if (EmergencyRadio != null && EmergencyRadio.FreqId == binding.FreqId && EmergencyRadio.Hotkey == binding.Hotkey)
             {
+                if (!EnableEmergencyRadio)
+                {
+                    StatusText = "Emergency radio is disabled in App Settings";
+                    return;
+                }
                 await HandlePttPressedAsync(EmergencyRadio);
                 return;
             }
@@ -963,7 +1388,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             StatusText = $"PTT start ({radio.Label} - Freq {radio.FreqId})";
 
             _backend?.Dispose();
-            _backend = new BackendClient(ServerBaseUrl, AdminToken);
+            _backend = new BackendClient(BuildBaseUrl(), AdminToken);
 
             _audio?.Dispose();
             _audio = new AudioCaptureService(SelectedAudioInputDevice);
@@ -972,37 +1397,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _streamCts?.Dispose();
             _streamCts = new CancellationTokenSource();
 
-            // Use Mumble for audio transmission
-            if (_mumble == null || !_mumble.IsConnected)
+            // Use VoiceService for audio transmission
+            if (_voice == null || !_voice.IsConnected)
             {
-                await ConnectMumbleAsync();
+                await ConnectVoiceAsync();
             }
 
-            if (_mumble != null && _mumble.IsConnected)
+            if (_voice != null && _voice.IsConnected)
             {
                 // Join the frequency channel — abort if join fails
-                bool joined = await _mumble.JoinFrequencyAsync(radio.FreqId);
+                bool joined = await _voice.JoinFrequencyAsync(radio.FreqId);
                 if (!joined)
                 {
                     StatusText = $"Cannot transmit: channel {radio.FreqId} unavailable";
                     radio.SetTransmitting(false);
                     return;
                 }
-                _mumble.StartTransmit();
+                _voice.StartTransmit();
                 _audio.Start();
             }
             else
             {
-                StatusText = "Mumble not connected";
+                StatusText = "Voice not connected";
                 radio.SetTransmitting(false);
                 return;
             }
 
-            // Notify backend of TX start and get listener count (non-fatal if fails)
+            // Notify backend of TX start (non-fatal if fails)
             try
             {
-                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
-                if (listeners >= 0) radio.ListenerCount = listeners;
+                await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
             }
             catch (Exception backendEx)
             {
@@ -1011,7 +1435,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             IsStreaming = true;
-            _beepService?.PlayTxStartBeep();
+            if (radio.IsEmergencyRadio)
+                _beepService?.PlayEmergencyTxBeep();
+            else
+                _beepService?.PlayTxStartBeep();
         }
         catch (Exception ex)
         {
@@ -1041,8 +1468,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (radio != null && _backend != null)
             {
-                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
-                if (listeners >= 0) radio.ListenerCount = listeners;
+                await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
             }
         }
         catch
@@ -1052,8 +1478,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _audio?.Dispose();
         _audio = null;
 
-        _mumble?.StopTransmit();
-        // Keep Mumble connection alive for next PTT
+        _voice?.StopTransmit();
+        // Keep voice connection alive for next PTT
 
         _streamCts?.Dispose();
         _streamCts = null;
@@ -1066,7 +1492,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         IsStreaming = false;
-        _beepService?.PlayTxEndBeep();
+        if (radio?.IsEmergencyRadio == true)
+            _beepService?.PlayEmergencyTxEndBeep();
+        else
+            _beepService?.PlayTxEndBeep();
         StatusText = "PTT stop";
     }
 
@@ -1074,10 +1503,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         try
         {
-            if (_mumble != null)
+            if (_voice != null)
             {
                 var format = _audio?.WaveFormat;
-                _mumble.SendAudio(data, format?.SampleRate ?? SampleRate, format?.Channels ?? 1);
+                _voice.SendAudio(data, format?.SampleRate ?? SampleRate, format?.Channels ?? 1);
             }
         }
         catch
@@ -1086,78 +1515,258 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public async Task ConnectMumbleAsync()
+    public async Task ConnectVoiceAsync()
     {
-        if (_mumble != null)
+        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort} userId={DiscordUserId} guildId={GuildId}");
+
+        if (_voice != null)
         {
-            await _mumble.DisconnectAsync();
-            _mumble.Dispose();
+            await _voice.DisconnectAsync();
+            _voice.Dispose();
         }
 
-        _mumble = new MumbleService();
-        _mumble.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
-        _mumble.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Mumble error: {ex.Message}");
-        _mumble.AudioReceived += OnMumbleAudioReceived;
+        _voice = new VoiceService();
+        _voice.StatusChanged += status =>
+        {
+            LogDebug($"[Voice] Status: {status}");
+            Application.Current.Dispatcher.Invoke(() => StatusText = status);
+        };
+        _voice.ErrorOccurred += ex =>
+        {
+            LogDebug($"[Voice] Error: {ex}");
+            Application.Current.Dispatcher.Invoke(() => StatusText = $"Voice error: {ex.Message}");
+        };
+        _voice.RxStateChanged += OnRxStateChanged;
+        _voice.FreqJoined += OnFreqJoined;
+        _voice.MuteConfirmed += OnMuteConfirmed;
         
         // Set output device
-        _mumble.SetOutputDevice(SelectedAudioOutputDevice);
+        _voice.SetOutputDevice(SelectedAudioOutputDevice);
 
-        // Mumble auth: discord_user_id as username, guild_id as password
-        // If a manual MumbleUsername is set, use it instead (for debugging / SuperUser)
-        var username = !string.IsNullOrWhiteSpace(MumbleUsername)
-            ? MumbleUsername
-            : !string.IsNullOrWhiteSpace(DiscordUserId)
-                ? DiscordUserId
-                : $"Companion_{Environment.MachineName}";
+        // Set master volumes
+        _voice.SetMasterInputVolume(InputVolume / 100f);
+        _voice.SetMasterOutputVolume(OutputVolume / 100f);
 
-        var password = !string.IsNullOrWhiteSpace(MumblePassword)
-            ? MumblePassword
-            : GuildId ?? "";
+        await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId, AuthToken);
+        IsVoiceConnected = _voice.IsConnected;
 
-        await _mumble.ConnectAsync(MumbleHost, MumblePort, username, password);
-        IsMumbleConnected = _mumble.IsConnected;
+        // Auto-join all enabled radio frequencies so we receive RX notifications and audio
+        if (IsVoiceConnected)
+        {
+            foreach (var panel in RadioPanels.Where(r => r.IsEnabled))
+            {
+                await _voice.JoinFrequencyAsync(panel.FreqId);
+                LogDebug($"[Voice] Auto-joined freq {panel.FreqId} ({panel.Label})");
+            }
+            if (EnableEmergencyRadio)
+            {
+                await _voice.JoinFrequencyAsync(EmergencyRadio.FreqId);
+                LogDebug($"[Voice] Auto-joined emergency freq {EmergencyRadio.FreqId}");
+            }
+        }
+
+        // Push per-radio audio settings to VoiceService (volume, pan, mute)
+        if (IsVoiceConnected)
+        {
+            PushAllRadioSettingsToVoice();
+            await PushAllServerMutesAsync();
+            await FetchAndApplyFreqNamesAsync();
+        }
+
+        LogDebug($"[Voice] ConnectVoiceAsync done: IsConnected={IsVoiceConnected}");
+    }
+
+    /// <summary>
+    /// Fetch frequency → channel name mappings from the server and apply to radio panels.
+    /// </summary>
+    private async Task FetchAndApplyFreqNamesAsync()
+    {
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl)) return;
+        try
+        {
+            using var client = new BackendClient(baseUrl, AdminToken ?? "");
+            var freqNames = await client.GetFreqNamesAsync();
+            if (freqNames.Count == 0) return;
+
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                foreach (var panel in RadioPanels)
+                {
+                    panel.ChannelName = freqNames.TryGetValue(panel.FreqId, out var name) ? name : "";
+                }
+                EmergencyRadio.ChannelName = freqNames.TryGetValue(EmergencyRadio.FreqId, out var eName) ? eName : "";
+            });
+            LogDebug($"[Voice] Applied {freqNames.Count} freq name mappings");
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"[Voice] Failed to fetch freq names: {ex.Message}");
+        }
     }
     
-    private void OnMumbleAudioReceived(uint sessionId, string username)
+    private void OnRxStateChanged(string discordUserId, string username, int freqId, string action)
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
-            // Add to recent transmissions for active radio (if connected to a channel)
-            var timestamp = $"{DateTime.Now:HH:mm} - {username}";
-            
-            // Find active radio panel based on current channel/frequency
-            if (_activeRadio != null && _activeRadio.IsEnabled && !_activeRadio.IsMuted)
+            // Find radio panel matching the frequency
+            var matchingRadio = RadioPanels.FirstOrDefault(r => r.IsEnabled && !r.IsMuted && r.FreqId == freqId);
+            if (matchingRadio == null && EnableEmergencyRadio && EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
             {
-                _activeRadio.AddTransmission(timestamp);
+                matchingRadio = EmergencyRadio;
             }
-            else
+
+            if (matchingRadio == null) return;
+
+            if (action == "start")
             {
-                // Add to all enabled, non-muted radios that are listening
-                foreach (var radio in RadioPanels.Where(r => r.IsEnabled && !r.IsMuted))
-                {
-                    radio.AddTransmission(timestamp);
-                    break; // Just add to first active for now
-                }
-                if (EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted)
-                {
-                    EmergencyRadio.AddTransmission(timestamp);
-                }
+                var timestamp = $"{DateTime.Now:HH:mm} - {username}";
+                matchingRadio.AddTransmission(timestamp);
+                matchingRadio.SetReceiving(true);
+
+                // Play appropriate RX beep
+                if (matchingRadio.IsEmergencyRadio)
+                    _beepService?.PlayEmergencyRxBeep();
+                else
+                    _beepService?.PlayRxStartBeep();
             }
-            
-            // Play RX beep for incoming audio
-            _beepService?.PlayRxStartBeep();
+            else if (action == "stop")
+            {
+                matchingRadio.SetReceiving(false);
+            }
         });
     }
 
-    public async Task DisconnectMumbleAsync()
+    private void OnFreqJoined(int freqId, int listenerCount)
     {
-        if (_mumble != null)
+        Application.Current.Dispatcher.Invoke(() =>
         {
-            await _mumble.DisconnectAsync();
-            _mumble.Dispose();
-            _mumble = null;
+            var panel = RadioPanels.FirstOrDefault(r => r.FreqId == freqId);
+            if (panel != null)
+                panel.ListenerCount = listenerCount;
+            if (EmergencyRadio.FreqId == freqId)
+                EmergencyRadio.ListenerCount = listenerCount;
+        });
+    }
+
+    private void OnRadioPanelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is not RadioPanelViewModel panel) return;
+        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled")
+        {
+            PushRadioSettingsToVoice(panel);
+
+            // Send server-side mute/unmute when mute state changes
+            if (e.PropertyName is "IsMuted" or "IsEnabled")
+            {
+                _ = PushServerMuteAsync(panel);
+            }
+
+            // Join/leave freq on server when radio is enabled/disabled (updates listener count for all users)
+            if (e.PropertyName is "IsEnabled")
+            {
+                _ = HandleRadioEnabledChangedAsync(panel);
+            }
         }
-        IsMumbleConnected = false;
+    }
+
+    private async Task HandleRadioEnabledChangedAsync(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        // Emergency radio gating: respect EnableEmergencyRadio setting
+        if (panel.IsEmergencyRadio && !EnableEmergencyRadio) return;
+
+        if (panel.IsEnabled)
+        {
+            await _voice.JoinFrequencyAsync(panel.FreqId);
+            LogDebug($"[Voice] Radio enabled → joined freq {panel.FreqId}");
+        }
+        else
+        {
+            await _voice.LeaveFrequencyAsync(panel.FreqId);
+            LogDebug($"[Voice] Radio disabled → left freq {panel.FreqId}");
+        }
+    }
+
+    private async Task HandleEmergencyRadioToggleAsync()
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        if (EnableEmergencyRadio)
+        {
+            await _voice.JoinFrequencyAsync(EmergencyRadio.FreqId);
+            LogDebug($"[Voice] Emergency radio enabled → joined freq {EmergencyRadio.FreqId}");
+        }
+        else
+        {
+            await _voice.LeaveFrequencyAsync(EmergencyRadio.FreqId);
+            LogDebug($"[Voice] Emergency radio disabled → left freq {EmergencyRadio.FreqId}");
+        }
+    }
+
+    private async Task PushServerMuteAsync(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        bool effectiveMuted = panel.IsMuted || !panel.IsEnabled;
+        if (panel.IsEmergencyRadio)
+            effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
+
+        if (effectiveMuted)
+            await _voice.MuteFrequencyAsync(panel.FreqId);
+        else
+            await _voice.UnmuteFrequencyAsync(panel.FreqId);
+    }
+
+    private async Task PushAllServerMutesAsync()
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        foreach (var panel in RadioPanels)
+        {
+            await PushServerMuteAsync(panel);
+        }
+        await PushServerMuteAsync(EmergencyRadio);
+    }
+
+    private void OnMuteConfirmed(int freqId, bool isMuted)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            LogDebug($"[Voice] Server mute confirmed: freq={freqId} muted={isMuted}");
+        });
+    }
+
+    private void PushRadioSettingsToVoice(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        bool effectiveMuted = panel.IsMuted || !panel.IsEnabled;
+        if (panel.IsEmergencyRadio)
+            effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
+
+        _voice.SetFreqSettings(panel.FreqId, panel.Volume / 100f, panel.Balance / 100f, effectiveMuted);
+    }
+
+    private void PushAllRadioSettingsToVoice()
+    {
+        foreach (var panel in RadioPanels)
+        {
+            PushRadioSettingsToVoice(panel);
+        }
+        PushRadioSettingsToVoice(EmergencyRadio);
+    }
+
+    public async Task DisconnectVoiceAsync()
+    {
+        if (_voice != null)
+        {
+            await _voice.DisconnectAsync();
+            _voice.Dispose();
+            _voice = null;
+        }
+        IsVoiceConnected = false;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -1170,7 +1779,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _hook?.Dispose();
         _backend?.Dispose();
         _audio?.Dispose();
-        _mumble?.Dispose();
+        _voice?.Dispose();
         _streamCts?.Dispose();
     }
 }

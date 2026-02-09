@@ -44,17 +44,9 @@
         "net10.0-windows7.0": {
           "targetAlias": "net10.0-windows",
           "dependencies": {
-            "BouncyCastle.Cryptography": {
-              "target": "Package",
-              "version": "[2.3.2, )"
-            },
             "Concentus": {
               "target": "Package",
               "version": "[1.1.7, )"
-            },
-            "Google.Protobuf": {
-              "target": "Package",
-              "version": "[3.25.1, )"
             },
             "NAudio": {
               "target": "Package",

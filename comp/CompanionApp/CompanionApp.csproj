@@ -11,7 +11,5 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
     <PackageReference Include="Concentus" Version="1.1.7" />
-    <PackageReference Include="Google.Protobuf" Version="3.25.1" />
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.3.2" />
   </ItemGroup>
 </Project>

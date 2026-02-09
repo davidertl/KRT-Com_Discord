@@ -172,7 +172,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>True when user can click "Login with Discord".</summary>
-    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress;
+    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress && !IsLoggedIn;
 
     /// <summary>Hint text shown when button is disabled.</summary>
     public string DiscordLoginHint
@@ -183,6 +183,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (!OauthEnabled) return "Server does not have Discord OAuth configured.";
             if (!PolicyAccepted) return "Accept the privacy policy to enable login.";
             if (_isOAuthInProgress) return "Login in progress…";
+            if (IsLoggedIn) return "";
             return "";
         }
     }
@@ -205,7 +206,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string LoggedInDisplayName
     {
         get => _loggedInDisplayName;
-        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); }
+        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
     }
 
     public bool IsLoggedIn => !string.IsNullOrEmpty(LoggedInDisplayName);

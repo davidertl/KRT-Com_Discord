@@ -10,7 +10,23 @@ public static class ConfigService
     public static string GetConfigFolder()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return Path.Combine(appData, "das-KRT_com");
+        var newFolder = Path.Combine(appData, "KRT-Com_Discord");
+        var oldFolder = Path.Combine(appData, "das-KRT_com");
+
+        // Migrate from old config folder if it exists and new one doesn't
+        if (Directory.Exists(oldFolder) && !Directory.Exists(newFolder))
+        {
+            try
+            {
+                Directory.Move(oldFolder, newFolder);
+            }
+            catch
+            {
+                // If migration fails, just use the new folder
+            }
+        }
+
+        return newFolder;
     }
 
     public static string GetConfigPath()

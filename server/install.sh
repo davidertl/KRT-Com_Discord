@@ -351,8 +351,7 @@ certificatesResolvers:
     acme:
       email: ${ACME_EMAIL}
       storage: ${TRAEFIK_DIR}/acme.json
-      httpChallenge:
-        entryPoint: web
+      tlsChallenge: {}
 
 providers:
   file:
@@ -616,6 +615,11 @@ function migrateUserIdHashing(db) {
     dsgvo,
   });
   voiceRelay.start();
+
+  // Wire voice relay to HTTP server (for ban-kick functionality)
+  if (typeof httpServer._setVoiceRelay === 'function') {
+    httpServer._setVoiceRelay(voiceRelay);
+  }
 
   // Route WebSocket upgrades by path
   // DSGVO HTTPS enforcement: reject WS upgrades that didn't come through TLS (Traefik)
@@ -1268,10 +1272,30 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     }
   }
 
+  /**
+   * Kick a user by their hashed Discord ID.
+   * Closes all active WebSocket connections and cleans up sessions.
+   */
+  function kickUser(hashedUserId) {
+    let kicked = 0;
+    for (const [token, session] of sessions) {
+      if (session.discordUserId === hashedUserId) {
+        console.log(`[voice] Kicking user ${hashedUserId.substring(0, 12)}... (ban)`);
+        if (session.ws && session.ws.readyState <= 1) {
+          session.ws.close(4003, 'banned');
+        }
+        cleanupSession(token);
+        kicked++;
+      }
+    }
+    return kicked;
+  }
+
   return {
     start,
     wss,
     notifyTxEvent,
+    kickUser,
     handleUpgrade: (req, socket, head) => {
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req);
@@ -2090,6 +2114,7 @@ const express = require('express');
 const http = require('http');
 
 function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds, tokenSecret, policyVersion, policyText, discordClientId, discordClientSecret, discordRedirectUri }) {
+  let _voiceRelay = null;
   const app = express();
   app.use(express.json());
 
@@ -2701,7 +2726,18 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (dsgvo && typeof dsgvo.banUser === 'function') {
       const hashedId = hashUserId(String(discordUserId));
       dsgvo.banUser(hashedId, String(discordUserId), reason || null);
-      res.json({ ok: true });
+
+      // Revoke all auth tokens for this user
+      db.prepare('DELETE FROM auth_tokens WHERE discord_user_id = ?').run(hashedId);
+
+      // Kick from active voice sessions
+      let kicked = 0;
+      if (_voiceRelay && typeof _voiceRelay.kickUser === 'function') {
+        kicked = _voiceRelay.kickUser(hashedId);
+      }
+
+      console.log(`[admin] Banned user ${hashedId.substring(0, 12)}... — tokens revoked, ${kicked} session(s) kicked`);
+      res.json({ ok: true, kicked });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });
     }
@@ -2740,7 +2776,15 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (dsgvo && typeof dsgvo.deleteAndBanUser === 'function') {
       const hashedId = hashUserId(String(discordUserId));
       const result = dsgvo.deleteAndBanUser(hashedId, String(discordUserId), reason);
-      res.json({ ok: true, data: result });
+
+      // Kick from active voice sessions
+      let kicked = 0;
+      if (_voiceRelay && typeof _voiceRelay.kickUser === 'function') {
+        kicked = _voiceRelay.kickUser(hashedId);
+      }
+
+      console.log(`[admin] Delete+Ban user ${hashedId.substring(0, 12)}... — ${kicked} session(s) kicked`);
+      res.json({ ok: true, data: { ...result, kicked } });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });
     }
@@ -2749,6 +2793,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
   server._setBot = (b) => { _bot = b; };
+  server._setVoiceRelay = (vr) => { _voiceRelay = vr; };
   return server;
 }
 

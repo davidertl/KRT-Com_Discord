@@ -152,6 +152,7 @@
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
     <util:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis"/>
     <util:StringToVisibilityConverter x:Key="StringToVis"/>
+    <util:BoolToHiddenVisibilityConverter x:Key="BoolToHidden"/>
   </Window.Resources>
 
   <Grid>
@@ -239,7 +240,7 @@
                                    Foreground="{StaticResource FreqDisplayText}"/>
                         <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
                                    Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
-                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToHidden}}"/>
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -351,10 +352,10 @@
                               <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
                                        Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
                             </Grid>
-                            <!-- Channel name from Discord (shown when available) -->
+                            <!-- Channel name from Discord (shown when available, Hidden to preserve layout) -->
                             <TextBlock Text="{Binding ChannelName}" FontSize="11" FontStyle="Italic"
                                        Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
-                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToHidden}}"/>
                           </StackPanel>
                         </Border>
 
@@ -830,20 +831,21 @@
                       <TextBlock Text="{Binding LoggedInDisplayName}" Foreground="{StaticResource AccentGreen}" FontSize="12" FontWeight="SemiBold"/>
                     </StackPanel>
 
-                    <!-- Hint when button is disabled -->
+                    <!-- Hint when button is disabled (hidden when logged in) -->
                     <TextBlock Text="{Binding DiscordLoginHint}" Foreground="#FF8866" FontSize="11" Margin="0,0,0,8"
                                TextWrapping="Wrap"
-                               Visibility="{Binding CanLoginWithDiscord, Converter={StaticResource InverseBoolToVis}}"/>
+                               Visibility="{Binding DiscordLoginHint, Converter={StaticResource StringToVis}}"/>
 
                     <!-- OAuth login status -->
                     <TextBlock Text="{Binding OAuthLoginStatus}" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,8"
                                TextWrapping="Wrap"
                                Visibility="{Binding OAuthLoginStatus, Converter={StaticResource StringToVis}}"/>
 
-                    <!-- Login with Discord button -->
+                    <!-- Login with Discord button (hidden when already logged in) -->
                     <Button Content="Login with Discord" Style="{StaticResource ModernButton}"
                             Click="LoginWithDiscord_Click"
                             IsEnabled="{Binding CanLoginWithDiscord}"
+                            Visibility="{Binding IsLoggedIn, Converter={StaticResource InverseBoolToVis}}"
                             HorizontalAlignment="Left" Margin="0,0,0,8"/>
 
                     <!-- Voice connect/disconnect -->

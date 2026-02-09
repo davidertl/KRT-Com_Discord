@@ -1,8 +1,8 @@
 High priority:
--add encryption to all out and inbound communication (websocket, audio)
-  > (✔) Implemented: Traefik reverse proxy with Let's Encrypt TLS. HTTP→HTTPS redirect. DSGVO-HTTPS-Enforcement middleware rejects plaintext traffic when DSGVO compliance mode is active. install.sh step [7/12] installs Traefik, [11/12] configures TLS + domain. service.sh menu items 60-63 for Traefik management.
--please also don't handle userid and clanid unhashed. 
-  > (✔) FIXED: All discord_user_id values are hashed via HMAC-SHA256 (using TOKEN_SECRET) before database storage. Raw Discord snowflake IDs are never persisted. Hash function: hashUserId() in src/crypto.js. All modules updated: discord.js (bot events), http.js (auth + data endpoints), voice.js (WebSocket auth), dsgvo.js (ban/policy functions). Admin endpoints accept raw IDs and hash before lookup. banned_users table stores raw_discord_id for admin display. Automatic migration on startup converts existing raw IDs to hashes.
+
+(✔) die konfiguration soll bitte in %APPDATA%/KRT-Com_Discord/config.json gespeichert werden statt %APPDATA%/das-KRT_com/config.json
+  > FIXED: ConfigService.cs updated to use KRT-Com_Discord folder. Automatic migration from old das-KRT_com folder on first launch.
+
 
 (✔) Token-based authentication & consent flow
   > Fix: Added src/crypto.js (HMAC-SHA256 signToken/verifyToken, 24h expiry). POST /auth/login validates user via Discord bot, returns signed token. Voice WS auth now requires authToken. New DB tables: banned_users, auth_tokens, policy_acceptance. Companion App: Verify button fetches GET /server-status + GET /privacy-policy. Privacy policy displayed with Accept button. Login gated behind policy acceptance. Token persisted for auto-reconnect.
@@ -17,8 +17,8 @@ High priority:
 (✔) Ban management
   > Fix: Added banned_users DB table. POST /admin/ban, DELETE /admin/ban/:userId, GET /admin/bans REST endpoints. Login and voice auth reject banned users. service.sh menu items 40-43 for ban/unban/list/delete-and-ban.
   -please add ban2fail setup to the service.sh panel, if a user gets banned so he can unban them easily, list them, or add a ip to be banned.
-  -add a debug tool to log ip adresses of users who are logging in. Please mark this mode clearly as a under-attack-mode and write this info to privacy policy, so that the users are aware of this mode and can make an informed decision about logging in. please also add a warning message to the service.sh panel when this mode is active, so that the admin is aware of the potential privacy implications.
-    - please revoke the under attack mode after a custom set time.
+-add a debug tool to log ip adresses of users who are logging in. Please mark this mode clearly as a under-attack-mode and write this info to privacy policy, so that the users are aware of this mode and can make an informed decision about logging in. please also add a warning message to the service.sh panel when this mode is active, so that the admin is aware of the potential privacy implications.
+- please revoke the under attack mode after a custom set time.
 
 (✔) DSGVO-compliance tool
   > Fix: Added src/dsgvo.js module with deleteUser/deleteGuild/runCleanup/startScheduler (24h interval). Retention: 2 days normal, 7 days debug. Debug mode auto-disables DSGVO. 6 REST admin endpoints added to http.js. service.sh menu items 20-25 for DSGVO status/toggle/debug/delete-user/delete-guild/cleanup with warnings on menu start. .env: DSGVO_ENABLED, DEBUG_MODE.
@@ -33,8 +33,10 @@ Medium priority:
 
 (✔) channel-name sync from Discord
   > Fix: mapping.js tracks freqId→channelName, discord.js runs scheduled re-scan (default 24h, configurable). REST: GET /freq/names, admin channel-sync endpoints. service.sh menu items 30-32. Client shows channel names below frequency.
-    -if the user changes to a channel that has no name, please do not show a name, but also do not show "undefined" or "null" or something like that. just hide the name if there is no name for the channel.
-    -also keep the window for the channel the same size, so even if no name is displayed, the space is kept for the name.
+    (✔) if the user changes to a channel that has no name, please do not show a name, but also do not show "undefined" or "null" or something like that. just hide the name if there is no name for the channel.
+      > FIXED: ChannelName setter coerces null to "". HasChannelName property hides TextBlock when empty. Server Map.get() returns undefined which is omitted by JSON.stringify.
+    (✔) also keep the window for the channel the same size, so even if no name is displayed, the space is kept for the name.
+      > FIXED: Added BoolToHiddenVisibilityConverter (true→Visible, false→Hidden). Channel name TextBlocks now use BoolToHidden instead of BoolToVis, preserving layout space when no name is shown.
 
 Low priority: 
 -make the tx and rx beep of emergency radio more signficant, so that it is clear that the emergency radio is active. maybe also add a visual indicator in the companion app.
@@ -58,7 +60,8 @@ Security:
     > Partial Fix: Auth endpoints require signed token (Bearer header). Public endpoints limited to /server-status and /privacy-policy. Admin endpoints require x-admin-token. Freq/TX endpoints still use self-reported identity.
   -Self-reported user identity (discordUserId in login body) trusted without verification.
     > FIXED (Alpha 0.0.4): Discord OAuth2 replaces self-reported identity. POST /auth/login gated behind debug mode (HTTP 410 in production). Identity now verified via Discord OAuth2 authorization code flow.
-      -when state is logged in as username please remove the login with discord button. you need to logout first to see the button again, or the loggin state changes, by any other reason.
+      (✔) when state is logged in as username please remove the login with discord button. you need to logout first to see the button again, or the loggin state changes, by any other reason.
+        > FIXED: CanLoginWithDiscord now includes !IsLoggedIn check. Login button uses InverseBoolToVis on IsLoggedIn for Visibility. Hint text uses StringToVis so it hides when empty. Button fully hidden when logged in, re-appears on logout.
 
   High:
   -Admin token sent as cleartext HTTP header (x-admin-token).
@@ -89,19 +92,14 @@ Security:
   -Server logs expose user PII (Discord IDs, display names).
   -Auth error messages enable user enumeration.
     > FIXED: Login returns generic "Login failed" on all auth failures.
-  -No session expiration policy.
-    > FIXED: Auth tokens expire after 24 hours. Token expiry checked on voice WS auth.
   -No admin mechanism to revoke/kill specific sessions.
     > Partial Fix: Ban system blocks login + voice auth. Individual token revocation not yet implemented.
-  -OAuth poll response leaked raw discordUserId/guildId.
-    > FIXED (Alpha 0.0.4): Poll response stripped to token + displayName only.
+  (✔) please automatically also kick users when banned, please also remove their active sessions and tokens, so that they are immediately logged out and cannot reconnect until the ban is lifted.
+    > FIXED: POST /admin/ban now deletes auth_tokens for banned user, voice.js kickUser() closes all active WebSocket sessions (code 4003 'banned'), cleanupSession removes DB rows and freq subscriptions. Same logic applied to /admin/dsgvo/delete-and-ban. voiceRelay wired to httpServer via _setVoiceRelay setter.
 
   Low:
   -Client VoiceHost/VoicePort not validated before use.
   -Debug log writes sensitive connection parameters in plaintext.
   -Command injection risk in install.sh interactive menu (user input interpolated into curl -d JSON).
 
-  Low:
-  -Client VoiceHost/VoicePort not validated before use.
-  -Debug log writes sensitive connection parameters in plaintext.
-  -Command injection risk in install.sh interactive menu (user input interpolated into curl -d JSON).
+

@@ -533,15 +533,30 @@ do_traefik_status() {
   systemctl status "$TRAEFIK_SERVICE" --no-pager || true
   echo ""
 
-  # Check if TLS cert exists
+  # Check if TLS cert exists in acme.json
   if [ -f "$TRAEFIK_DIR/acme.json" ]; then
     local ACME_SIZE
     ACME_SIZE="$(stat -c%s "$TRAEFIK_DIR/acme.json" 2>/dev/null || echo 0)"
     if [ "$ACME_SIZE" -gt 10 ]; then
-      log_ok "TLS Zertifikat: vorhanden (acme.json: ${ACME_SIZE} Bytes)"
+      # Check if Certificates array actually has entries (not null)
+      if python3 -c "
+import json,sys
+with open('$TRAEFIK_DIR/acme.json') as f:
+  d=json.load(f)
+for r in d.values():
+  certs=r.get('Certificates') if isinstance(r,dict) else None
+  if certs: sys.exit(0)
+sys.exit(1)" 2>/dev/null; then
+        log_ok "TLS Zertifikat: vorhanden in acme.json (${ACME_SIZE} Bytes)"
+      else
+        log_warn "TLS Zertifikat: acme.json vorhanden aber kein Zertifikat bezogen"
+        log_info "Tipp: Nutze Menüpunkt 64 für eine detaillierte Zertifikatsprüfung"
+      fi
     else
       log_warn "TLS Zertifikat: noch nicht bezogen (acme.json leer)"
     fi
+  else
+    log_warn "TLS Zertifikat: acme.json nicht gefunden"
   fi
 
   local CUR_DOMAIN
@@ -575,6 +590,166 @@ do_traefik_restart() {
 do_traefik_logs() {
   log_info "Traefik Live Logs:"
   journalctl -u "$TRAEFIK_SERVICE" -f
+}
+
+do_traefik_cert_check() {
+  echo ""
+  log_info "=== Let's Encrypt Zertifikatsprüfung ==="
+  echo ""
+
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -z "$CUR_DOMAIN" ]; then
+    log_error "Keine Domain in .env konfiguriert — kann Zertifikat nicht prüfen"
+    return
+  fi
+  log_info "Domain: $CUR_DOMAIN"
+  echo ""
+
+  # --- 1. Check acme.json ---
+  log_info "--- acme.json Status ---"
+  if [ ! -f "$TRAEFIK_DIR/acme.json" ]; then
+    log_error "acme.json nicht gefunden unter $TRAEFIK_DIR/acme.json"
+  else
+    local ACME_PERMS
+    ACME_PERMS="$(stat -c%a "$TRAEFIK_DIR/acme.json" 2>/dev/null || echo '?')"
+    if [ "$ACME_PERMS" != "600" ]; then
+      log_warn "acme.json Berechtigungen: $ACME_PERMS (sollte 600 sein)"
+    else
+      log_ok "acme.json Berechtigungen: 600"
+    fi
+
+    # Parse acme.json for certificate info
+    python3 -c "
+import json, sys, base64, subprocess, tempfile, os
+try:
+    with open('$TRAEFIK_DIR/acme.json') as f:
+        data = json.load(f)
+except Exception as e:
+    print(f'  FEHLER: acme.json kann nicht gelesen werden: {e}')
+    sys.exit(1)
+
+found = False
+for resolver_name, resolver in data.items():
+    if not isinstance(resolver, dict):
+        continue
+    account = resolver.get('Account')
+    if account and account.get('Registration'):
+        reg = account['Registration']
+        print(f'  ACME Account: registriert (URI: {reg.get("uri", "?")}'[:80] + ')')
+    certs = resolver.get('Certificates')
+    if not certs:
+        print(f'  Zertifikate: KEINE (Certificates ist null oder leer)')
+        continue
+    for cert_entry in certs:
+        domain = cert_entry.get('domain', {}).get('main', '?')
+        sans = cert_entry.get('domain', {}).get('SANs', [])
+        print(f'  Zertifikat für: {domain}')
+        if sans:
+            print(f'  SANs: {", ".join(sans)}')
+        # Decode and inspect certificate
+        cert_pem = cert_entry.get('certificate', '')
+        if cert_pem:
+            try:
+                cert_bytes = base64.b64decode(cert_pem)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pem') as tf:
+                    tf.write(cert_bytes)
+                    tf_name = tf.name
+                result = subprocess.run(
+                    ['openssl', 'x509', '-in', tf_name, '-noout',
+                     '-issuer', '-subject', '-dates', '-fingerprint'],
+                    capture_output=True, text=True, timeout=5
+                )
+                os.unlink(tf_name)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        print(f'  {line}')
+                found = True
+            except Exception as e:
+                print(f'  Zertifikat-Dekodierung fehlgeschlagen: {e}')
+if not found:
+    print('  WARNUNG: Kein gültiges Zertifikat in acme.json gefunden')
+" 2>/dev/null || log_warn "python3/openssl für acme.json-Analyse nicht verfügbar"
+  fi
+  echo ""
+
+  # --- 2. Live TLS check via openssl s_client ---
+  log_info "--- Live TLS-Verbindungstest (openssl) ---"
+  if ! command -v openssl &>/dev/null; then
+    log_warn "openssl ist nicht installiert — Live-Check übersprungen"
+    return
+  fi
+
+  local CERT_OUTPUT
+  CERT_OUTPUT="$(echo | openssl s_client -servername "$CUR_DOMAIN" -connect "$CUR_DOMAIN:443" 2>/dev/null)"
+  if [ -z "$CERT_OUTPUT" ]; then
+    log_error "Keine TLS-Verbindung zu $CUR_DOMAIN:443 möglich"
+    log_info "Ist Traefik gestartet? Läuft Port 443?"
+    return
+  fi
+
+  # Extract certificate details
+  local ISSUER SUBJECT NOT_BEFORE NOT_AFTER SERIAL
+  ISSUER="$(echo "$CERT_OUTPUT" | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer= *//' || echo '?')"
+  SUBJECT="$(echo "$CERT_OUTPUT" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject= *//' || echo '?')"
+  NOT_BEFORE="$(echo "$CERT_OUTPUT" | openssl x509 -noout -startdate 2>/dev/null | cut -d= -f2 || echo '?')"
+  NOT_AFTER="$(echo "$CERT_OUTPUT" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || echo '?')"
+
+  echo "  Subject:    $SUBJECT"
+  echo "  Issuer:     $ISSUER"
+  echo "  Gültig ab:  $NOT_BEFORE"
+  echo "  Gültig bis: $NOT_AFTER"
+
+  # Check if self-signed (Traefik default cert)
+  if echo "$ISSUER" | grep -qi 'TRAEFIK DEFAULT CERT'; then
+    echo ""
+    log_error "SELBST-SIGNIERTES ZERTIFIKAT (Traefik Default Cert)!"
+    log_warn "Let's Encrypt Zertifikat wurde NICHT bezogen."
+    echo ""
+    log_info "Mögliche Ursachen:"
+    log_info "  1. DNS für $CUR_DOMAIN zeigt nicht auf diesen Server"
+    log_info "  2. Port 443 ist durch Firewall blockiert"
+    log_info "  3. ACME Challenge schlägt fehl (prüfe Traefik Logs: Menüpunkt 62)"
+    log_info "  4. acme.json Berechtigungen falsch (muss 600 sein)"
+    echo ""
+    log_info "Sofortmaßnahme: acme.json zurücksetzen und Traefik neustarten:"
+    log_info "  echo '{}' > $TRAEFIK_DIR/acme.json"
+    log_info "  chmod 600 $TRAEFIK_DIR/acme.json"
+    log_info "  systemctl restart traefik"
+  elif echo "$ISSUER" | grep -qi "Let's Encrypt\|R[0-9]\|E[0-9]\|ISRG"; then
+    log_ok "Zertifikat: Let's Encrypt"
+
+    # Calculate days remaining
+    local EXPIRY_EPOCH NOW_EPOCH DAYS_LEFT
+    EXPIRY_EPOCH="$(echo "$CERT_OUTPUT" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 | xargs -I{} date -d '{}' +%s 2>/dev/null || echo 0)"
+    NOW_EPOCH="$(date +%s)"
+    if [ "$EXPIRY_EPOCH" -gt 0 ] 2>/dev/null; then
+      DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+      if [ "$DAYS_LEFT" -lt 0 ]; then
+        log_error "Zertifikat ist ABGELAUFEN seit $(( -DAYS_LEFT )) Tagen!"
+      elif [ "$DAYS_LEFT" -lt 7 ]; then
+        log_warn "Zertifikat läuft in $DAYS_LEFT Tagen ab! (Erneuerung prüfen)"
+      elif [ "$DAYS_LEFT" -lt 30 ]; then
+        log_warn "Zertifikat läuft in $DAYS_LEFT Tagen ab (Erneuerung sollte automatisch erfolgen)"
+      else
+        log_ok "Zertifikat gültig für $DAYS_LEFT Tage"
+      fi
+    fi
+  else
+    log_info "Zertifikats-Aussteller: $ISSUER"
+    log_warn "Kein Let's Encrypt Zertifikat — prüfe ob das gewollt ist"
+  fi
+
+  # --- 3. Verify chain ---
+  local VERIFY_RESULT
+  VERIFY_RESULT="$(echo | openssl s_client -servername "$CUR_DOMAIN" -connect "$CUR_DOMAIN:443" 2>&1 | grep -i 'verify return code' || true)"
+  if echo "$VERIFY_RESULT" | grep -q 'verify return code: 0'; then
+    log_ok "Zertifikatskette: gültig (verify return code: 0)"
+  elif [ -n "$VERIFY_RESULT" ]; then
+    log_warn "Zertifikatskette: $VERIFY_RESULT"
+  fi
+
+  echo ""
 }
 
 do_traefik_update_domain() {
@@ -802,6 +977,7 @@ do_menu() {
     echo -e "${CYAN}61) Traefik neustarten${NC}"
     echo -e "${CYAN}62) Traefik Live-Logs${NC}"
     echo -e "${CYAN}63) Domain ändern${NC}"
+    echo -e "${CYAN}64) Let's Encrypt Zertifikat prüfen${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -943,6 +1119,9 @@ do_menu() {
         ;;
       63)
         do_traefik_update_domain
+        ;;
+      64)
+        do_traefik_cert_check
         ;;
 
       0)

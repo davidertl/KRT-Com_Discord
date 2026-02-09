@@ -310,6 +310,14 @@ function mustEnv(name) {
   const tokenSecret = process.env.TOKEN_SECRET || '';
   if (!tokenSecret) console.warn('[WARN] TOKEN_SECRET not set - token-based auth will be disabled');
 
+  // Discord OAuth2 config
+  const discordClientId = process.env.DISCORD_CLIENT_ID || '';
+  const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || '';
+  const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || '';
+  if (!discordClientId || !discordClientSecret || !discordRedirectUri) {
+    console.warn('[WARN] Discord OAuth2 not fully configured (DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT_URI)');
+  }
+
   const policyVersion = process.env.POLICY_VERSION || '1.0';
   let policyText = 'No privacy policy configured.';
   const policyPath = process.env.POLICY_PATH || path.join(__dirname, '..', 'config', 'privacy-policy.md');
@@ -337,6 +345,9 @@ function mustEnv(name) {
     tokenSecret,
     policyVersion,
     policyText,
+    discordClientId,
+    discordClientSecret,
+    discordRedirectUri,
   });
 
   const wsHub = createWsHub({ stateStore });
@@ -748,9 +759,9 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
       return;
     }
 
-    // Look up user
+    // Look up user (skip if token already provided display name)
     const user = usersStore ? usersStore.get(String(resolvedUserId), String(resolvedGuildId)) : null;
-    if (!user) {
+    if (!user && !resolvedDisplayName) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'user not found in guild' }));
       return;
     }
@@ -759,7 +770,7 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     const sessionToken = crypto.randomBytes(24).toString('hex');
     const now = Date.now();
 
-    const displayName = resolvedDisplayName || user.display_name || String(resolvedUserId);
+    const displayName = resolvedDisplayName || (user ? user.display_name : null) || String(resolvedUserId);
     const session = {
       discordUserId: String(resolvedUserId),
       guildId: String(resolvedGuildId),
@@ -1430,12 +1441,42 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     };
   }
 
+  /**
+   * Live-fetch a single guild member from Discord API.
+   * Returns { discordUserId, guildId, displayName } or null.
+   * Also upserts into usersStore on success.
+   */
+  async function fetchGuildMember(discordUserId, targetGuildId) {
+    try {
+      const resolvedGuildId = targetGuildId || guildId;
+      if (!resolvedGuildId) return null;
+      const guild = client.guilds.cache.get(resolvedGuildId);
+      if (!guild) return null;
+      const member = await guild.members.fetch(discordUserId).catch(() => null);
+      if (!member || member.user.bot) return null;
+      const displayName = member.nickname || member.displayName || member.user.username;
+      if (usersStore) {
+        usersStore.upsert({
+          discord_user_id: String(discordUserId),
+          guild_id: String(resolvedGuildId),
+          display_name: String(displayName),
+          updated_at_ms: Date.now(),
+        });
+      }
+      return { discordUserId: String(discordUserId), guildId: String(resolvedGuildId), displayName: String(displayName) };
+    } catch (e) {
+      console.error('[discord] fetchGuildMember error:', e.message);
+      return null;
+    }
+  }
+
   return {
     start: async () => { await client.login(token); },
     stop: async () => { clearInterval(_syncHandle); await client.destroy(); },
     triggerChannelSync,
     setSyncInterval,
     getSyncStatus,
+    fetchGuildMember,
   };
 }
 
@@ -1748,7 +1789,7 @@ write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds, tokenSecret, policyVersion, policyText }) {
+function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds, tokenSecret, policyVersion, policyText, discordClientId, discordClientSecret, discordRedirectUri }) {
   const app = express();
   app.use(express.json());
 
@@ -1757,13 +1798,34 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   let onTxEventFn = null;
   let _bot = bot;
 
+  // In-memory pending OAuth states: state -> { token, displayName, timestamp } or null (pending)
+  const pendingOAuth = new Map();
+  // Cleanup old pending states every 5 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [state, val] of pendingOAuth) {
+      if (!val && (pendingOAuthTimestamps.get(state) || 0) < now - 5 * 60 * 1000) {
+        pendingOAuth.delete(state);
+        pendingOAuthTimestamps.delete(state);
+      }
+      if (val && val.timestamp < now - 5 * 60 * 1000) {
+        pendingOAuth.delete(state);
+        pendingOAuthTimestamps.delete(state);
+      }
+    }
+  }, 5 * 60 * 1000);
+
+  // Track timestamps for pending states
+  const pendingOAuthTimestamps = new Map();
+
   app.get('/health', (req, res) => res.json({ ok: true }));
 
   // --- Public endpoints (no auth required) ---
 
-  // Server status: version, DSGVO mode, debug mode, policy version
+  // Server status: version, DSGVO mode, debug mode, policy version, OAuth URL
   app.get('/server-status', (req, res) => {
     const status = dsgvo ? dsgvo.getStatus() : {};
+    const oauthConfigured = !!(discordClientId && discordClientSecret && discordRedirectUri);
     res.json({
       ok: true,
       data: {
@@ -1772,6 +1834,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         debugMode: status.debugMode || false,
         retentionDays: status.retentionDays || 0,
         policyVersion: policyVersion || '1.0',
+        oauthEnabled: oauthConfigured,
+        debugLoginEnabled: status.debugMode || false,
       },
     });
   });
@@ -1790,7 +1854,13 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   // --- Auth endpoints ---
 
   // Login: verify user exists in guild, issue signed token
-  app.post('/auth/login', (req, res) => {
+  // SECURITY: Only available in debug mode — use Discord OAuth2 for production login
+  app.post('/auth/login', async (req, res) => {
+    const debugActive = dsgvo ? dsgvo.getStatus().debugMode : false;
+    if (!debugActive) {
+      return res.status(410).json({ ok: false, error: 'direct_login_disabled', message: 'Direct login is disabled. Use Discord OAuth2 to log in. Enable debug mode via service.sh to re-enable.' });
+    }
+
     const { discordUserId, guildId } = req.body || {};
     if (!discordUserId || !guildId) {
       return res.status(400).json({ ok: false, error: 'missing discordUserId or guildId' });
@@ -1806,8 +1876,17 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(403).json({ ok: false, error: 'access denied' });
     }
 
-    // Look up user in guild
-    const user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : null;
+    // Look up user in local cache
+    let user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : null;
+
+    // Fallback: live Discord API lookup if not in cache
+    if (!user && _bot && typeof _bot.fetchGuildMember === 'function') {
+      const fetched = await _bot.fetchGuildMember(String(discordUserId), String(guildId));
+      if (fetched) {
+        user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : { display_name: fetched.displayName };
+      }
+    }
+
     if (!user) {
       return res.status(404).json({ ok: false, error: 'user not found in guild' });
     }
@@ -1867,6 +1946,190 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     }
 
     res.json({ ok: true, data: { accepted: true, version: pv } });
+  });
+
+  // --- Discord OAuth2 endpoints ---
+
+  // Step 1: Companion app opens this URL in browser → redirects to Discord authorize
+  app.get('/auth/discord/redirect', (req, res) => {
+    const { state } = req.query;
+    if (!state) return res.status(400).send('Missing state parameter');
+    if (!discordClientId || !discordRedirectUri) {
+      return res.status(500).send('Discord OAuth2 not configured on this server');
+    }
+    pendingOAuth.set(state, null);
+    pendingOAuthTimestamps.set(state, Date.now());
+
+    const scope = 'identify guilds';
+    const url = 'https://discord.com/oauth2/authorize?response_type=code'
+      + '&client_id=' + encodeURIComponent(discordClientId)
+      + '&scope=' + encodeURIComponent(scope)
+      + '&state=' + encodeURIComponent(state)
+      + '&redirect_uri=' + encodeURIComponent(discordRedirectUri)
+      + '&prompt=consent';
+    res.redirect(url);
+  });
+
+  // Step 2: Discord redirects here after user authorizes → exchange code → issue token
+  app.get('/auth/discord/callback', async (req, res) => {
+    const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send('Missing code or state');
+    if (!pendingOAuth.has(state)) return res.status(400).send('Unknown or expired state');
+
+    try {
+      // Exchange code for Discord access token
+      const tokenResp = await fetch('https://discord.com/api/v10/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: String(code),
+          redirect_uri: discordRedirectUri,
+          client_id: discordClientId,
+          client_secret: discordClientSecret,
+        }),
+      });
+      if (!tokenResp.ok) {
+        const errBody = await tokenResp.text();
+        console.error('[oauth] Token exchange failed:', tokenResp.status, errBody);
+        return res.status(500).send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>Could not exchange authorization code.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
+      const tokenData = await tokenResp.json();
+      const discordAccessToken = tokenData.access_token;
+
+      // Fetch user identity
+      const userResp = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: 'Bearer ' + discordAccessToken },
+      });
+      if (!userResp.ok) {
+        return res.status(500).send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>Could not fetch user identity.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
+      const discordUser = await userResp.json();
+      const discordUserId = discordUser.id;
+      const discordUsername = discordUser.global_name || discordUser.username || discordUser.id;
+
+      // Fetch user guilds to find matching guild
+      const guildsResp = await fetch('https://discord.com/api/v10/users/@me/guilds', {
+        headers: { Authorization: 'Bearer ' + discordAccessToken },
+      });
+      let userGuilds = [];
+      if (guildsResp.ok) {
+        userGuilds = await guildsResp.json();
+      }
+
+      // Find matching allowed guild
+      let matchedGuildId = null;
+      if (allowedGuildIds.length > 0) {
+        for (const g of userGuilds) {
+          if (allowedGuildIds.includes(String(g.id))) {
+            matchedGuildId = String(g.id);
+            break;
+          }
+        }
+        if (!matchedGuildId) {
+          pendingOAuth.set(state, { error: 'not_in_guild', timestamp: Date.now() });
+          return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>You are not a member of the allowed Discord server.</p><p style="color:#888">You can close this window.</p></body></html>');
+        }
+      } else if (userGuilds.length > 0) {
+        matchedGuildId = String(userGuilds[0].id);
+      }
+
+      if (!matchedGuildId) {
+        pendingOAuth.set(state, { error: 'no_guild', timestamp: Date.now() });
+        return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>No guilds found for your account.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
+
+      // Check ban
+      if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(String(discordUserId))) {
+        pendingOAuth.set(state, { error: 'banned', timestamp: Date.now() });
+        return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Access Denied</h2><p>Your account has been banned from this server.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
+
+      // Fetch/upsert guild member via bot for display name
+      let displayName = discordUsername;
+      if (_bot && typeof _bot.fetchGuildMember === 'function') {
+        const member = await _bot.fetchGuildMember(String(discordUserId), matchedGuildId);
+        if (member) displayName = member.displayName;
+      }
+
+      // Issue signed auth token
+      const authPayload = {
+        uid: String(discordUserId),
+        gid: matchedGuildId,
+        name: displayName,
+        iat: Date.now(),
+        exp: Date.now() + 24 * 60 * 60 * 1000,
+      };
+      const authToken = signToken(authPayload, tokenSecret);
+
+      // Store token in DB
+      db.prepare(
+        'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
+      ).run(authToken.substring(0, 64), String(discordUserId), matchedGuildId, displayName, authPayload.iat, authPayload.exp);
+
+      // Store result for companion app polling
+      // NOTE: Do NOT store raw discordUserId/guildId — the signed token contains all needed info
+      pendingOAuth.set(state, {
+        token: authToken,
+        displayName,
+        policyVersion: policyVersion || '1.0',
+        policyAccepted: dsgvo ? dsgvo.hasPolicyAcceptance(String(discordUserId), policyVersion || '1.0') : true,
+        timestamp: Date.now(),
+      });
+
+      // Revoke Discord access token (we don't need it anymore)
+      try {
+        await fetch('https://discord.com/api/v10/oauth2/token/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            token: discordAccessToken,
+            token_type_hint: 'access_token',
+            client_id: discordClientId,
+            client_secret: discordClientSecret,
+          }),
+        });
+      } catch (e) { console.warn('[oauth] Token revoke failed:', e.message); }
+
+      console.log('[oauth] Login OK: ' + discordUserId + ' (' + displayName + ') in guild ' + matchedGuildId);
+      res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>&#10003; Login Successful</h2><p style="color:#ccc">Welcome, <strong>' + displayName + '</strong></p><p style="color:#888">You can close this window and return to the Companion App.</p></body></html>');
+    } catch (e) {
+      console.error('[oauth] Callback error:', e);
+      pendingOAuth.set(state, { error: 'server_error', timestamp: Date.now() });
+      res.status(500).send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>An unexpected error occurred.</p><p style="color:#888">You can close this window.</p></body></html>');
+    }
+  });
+
+  // Step 3: Companion app polls this endpoint for the OAuth result
+  app.get('/auth/discord/poll', (req, res) => {
+    const { state } = req.query;
+    if (!state) return res.status(400).json({ ok: false, error: 'missing state' });
+    if (!pendingOAuth.has(state)) return res.json({ ok: true, data: { status: 'unknown' } });
+
+    const result = pendingOAuth.get(state);
+    if (result === null) {
+      return res.json({ ok: true, data: { status: 'pending' } });
+    }
+
+    if (result.error) {
+      pendingOAuth.delete(state);
+      pendingOAuthTimestamps.delete(state);
+      return res.json({ ok: true, data: { status: 'error', error: result.error } });
+    }
+
+    // Success – return token and clean up
+    pendingOAuth.delete(state);
+    pendingOAuthTimestamps.delete(state);
+    res.json({
+      ok: true,
+      data: {
+        status: 'success',
+        token: result.token,
+        displayName: result.displayName,
+        policyVersion: result.policyVersion,
+        policyAccepted: result.policyAccepted,
+      },
+    });
   });
 
   app.get('/state/:discordUserId', (req, res) => {
@@ -2189,6 +2452,24 @@ if [[ "$CONFIGURE_ENV" =~ ^[jJ]$ ]]; then
   TOKEN_SECRET="$(openssl rand -hex 32)"
   log_ok "TOKEN_SECRET generiert"
 
+  # Discord OAuth2 configuration (optional)
+  log_input ""
+  log_input "=== Discord OAuth2 (optional – für Login mit Discord) ==="
+  log_input "Erstelle eine Application auf https://discord.com/developers/applications"
+  log_input "Unter OAuth2 → Redirects muss die Redirect URI eingetragen sein."
+  log_input "Format: http://<IP-oder-Domain>:<Port>/auth/discord/callback"
+  log_input ""
+  read -r -p "$(echo -e "${CYAN}Discord Client ID (Application ID, leer = kein OAuth):${NC} ")" DISCORD_CLIENT_ID
+  if [ -n "$DISCORD_CLIENT_ID" ]; then
+    read -s -p "$(echo -e "${CYAN}Discord Client Secret:${NC} ")" DISCORD_CLIENT_SECRET; echo ""
+    local DEFAULT_REDIRECT="http://${BIND_HOST}:${BIND_PORT}/auth/discord/callback"
+    read -r -p "$(echo -e "${CYAN}Discord Redirect URI [${DEFAULT_REDIRECT}]:${NC} ")" DISCORD_REDIRECT_URI
+    DISCORD_REDIRECT_URI="${DISCORD_REDIRECT_URI:-$DEFAULT_REDIRECT}"
+  else
+    DISCORD_CLIENT_SECRET=""
+    DISCORD_REDIRECT_URI=""
+  fi
+
   cat > "$ENV_FILE" <<EOF
 DISCORD_TOKEN=$DISCORD_TOKEN
 $([ -n "$DISCORD_GUILD_ID" ] && echo "DISCORD_GUILD_ID=$DISCORD_GUILD_ID" || echo "# DISCORD_GUILD_ID=123456789012345678")
@@ -2203,6 +2484,11 @@ ADMIN_TOKEN=$ADMIN_TOKEN
 
 # Token signing secret for auth (auto-generated)
 TOKEN_SECRET=$TOKEN_SECRET
+
+# Discord OAuth2 (Login with Discord)
+$([ -n "$DISCORD_CLIENT_ID" ] && echo "DISCORD_CLIENT_ID=$DISCORD_CLIENT_ID" || echo "# DISCORD_CLIENT_ID=")
+$([ -n "$DISCORD_CLIENT_SECRET" ] && echo "DISCORD_CLIENT_SECRET=$DISCORD_CLIENT_SECRET" || echo "# DISCORD_CLIENT_SECRET=")
+$([ -n "$DISCORD_REDIRECT_URI" ] && echo "DISCORD_REDIRECT_URI=$DISCORD_REDIRECT_URI" || echo "# DISCORD_REDIRECT_URI=https://your-domain.com/auth/discord/callback")
 
 # Privacy policy
 POLICY_VERSION=1.0

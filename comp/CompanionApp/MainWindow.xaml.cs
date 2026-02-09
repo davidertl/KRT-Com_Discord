@@ -47,8 +47,13 @@ public partial class MainWindow : Window
         }
         else
         {
-            await _vm.LoginAndConnectAsync();
+            await _vm.ConnectVoiceAsync();
         }
+    }
+
+    private async void LoginWithDiscord_Click(object sender, RoutedEventArgs e)
+    {
+        await _vm.LoginWithDiscordAsync();
     }
 
     private async void Verify_Click(object sender, RoutedEventArgs e)

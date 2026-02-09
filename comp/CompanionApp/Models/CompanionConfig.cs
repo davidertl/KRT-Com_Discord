@@ -4,8 +4,6 @@ namespace CompanionApp.Models;
 
 public class CompanionConfig
 {
-    public string ServerBaseUrl { get; set; } = "http://127.0.0.1:3000";
-    public string AdminToken { get; set; } = "";
     public string DiscordUserId { get; set; } = "";
     public int RadioSlot { get; set; } = 1;
     public int SampleRate { get; set; } = 48000;

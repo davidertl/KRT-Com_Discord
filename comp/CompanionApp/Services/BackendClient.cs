@@ -17,6 +17,7 @@ public sealed class ServerStatusInfo
     public bool DebugMode { get; set; }
     public int RetentionDays { get; set; }
     public string PolicyVersion { get; set; } = "1.0";
+    public bool OauthEnabled { get; set; }
 }
 
 /// <summary>
@@ -37,6 +38,19 @@ public sealed class LoginResult
     public string DisplayName { get; set; } = "";
     public string PolicyVersion { get; set; } = "1.0";
     public bool PolicyAccepted { get; set; }
+}
+
+/// <summary>
+/// OAuth2 poll result from GET /auth/discord/poll.
+/// </summary>
+public sealed class OAuthPollResult
+{
+    public string Status { get; set; } = ""; // "pending", "success", "error", "unknown"
+    public string? Token { get; set; }
+    public string? DisplayName { get; set; }
+    public string? PolicyVersion { get; set; }
+    public bool PolicyAccepted { get; set; }
+    public string? Error { get; set; }
 }
 
 public sealed class BackendClient : IDisposable
@@ -88,6 +102,7 @@ public sealed class BackendClient : IDisposable
                 DebugMode = data.TryGetProperty("debugMode", out var dm) && dm.GetBoolean(),
                 RetentionDays = data.TryGetProperty("retentionDays", out var r) ? r.GetInt32() : 0,
                 PolicyVersion = data.TryGetProperty("policyVersion", out var pv) ? pv.GetString() ?? "1.0" : "1.0",
+                OauthEnabled = data.TryGetProperty("oauthEnabled", out var oa) && oa.GetBoolean(),
             };
         }
         catch
@@ -125,6 +140,38 @@ public sealed class BackendClient : IDisposable
     }
 
     // --- Instance methods ---
+
+    /// <summary>
+    /// Poll for OAuth2 login result. Returns OAuthPollResult or null on failure.
+    /// </summary>
+    public static async Task<OAuthPollResult?> PollOAuthTokenAsync(string baseUrl, string state)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            var url = baseUrl.TrimEnd('/') + "/auth/discord/poll?state=" + Uri.EscapeDataString(state);
+            using var resp = await http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode) return null;
+
+            var body = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
+
+            return new OAuthPollResult
+            {
+                Status = data.TryGetProperty("status", out var s) ? s.GetString() ?? "" : "",
+                Token = data.TryGetProperty("token", out var tk) ? tk.GetString() : null,
+                DisplayName = data.TryGetProperty("displayName", out var dn) ? dn.GetString() : null,
+                PolicyVersion = data.TryGetProperty("policyVersion", out var pv) ? pv.GetString() : null,
+                PolicyAccepted = data.TryGetProperty("policyAccepted", out var pa) && pa.GetBoolean(),
+                Error = data.TryGetProperty("error", out var err) ? err.GetString() : null,
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Login with discordUserId and guildId. Returns LoginResult or null on failure.

@@ -519,6 +519,124 @@ do_delete_and_ban() {
 }
 
 # --------------------------------------------------
+# OAuth2 Credentials Update
+# --------------------------------------------------
+do_update_oauth() {
+  echo ""
+  log_info "Discord OAuth2 Zugangsdaten aktualisieren"
+  log_info "Aktuelle Werte werden aus .env gelesen."
+  echo ""
+
+  # Read current values
+  local CUR_CLIENT_ID CUR_REDIRECT_URI
+  CUR_CLIENT_ID="$(grep -E '^DISCORD_CLIENT_ID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  CUR_REDIRECT_URI="$(grep -E '^DISCORD_REDIRECT_URI=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+
+  log_info "Aktuelle Client ID:    ${CUR_CLIENT_ID:-(nicht gesetzt)}"
+  log_info "Aktuelle Redirect URI: ${CUR_REDIRECT_URI:-(nicht gesetzt)}"
+  echo ""
+  log_info "Leer lassen = aktuellen Wert beibehalten."
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Neue Discord Client ID [${CUR_CLIENT_ID:-leer}]:${NC} ")" NEW_CLIENT_ID
+  NEW_CLIENT_ID="${NEW_CLIENT_ID:-$CUR_CLIENT_ID}"
+
+  read -s -p "$(echo -e "${CYAN}Neues Discord Client Secret (Eingabe unsichtbar, leer=beibehalten):${NC} ")" NEW_CLIENT_SECRET; echo ""
+  if [ -z "$NEW_CLIENT_SECRET" ]; then
+    NEW_CLIENT_SECRET="$(grep -E '^DISCORD_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  fi
+
+  read -r -p "$(echo -e "${CYAN}Neue Redirect URI [${CUR_REDIRECT_URI:-leer}]:${NC} ")" NEW_REDIRECT_URI
+  NEW_REDIRECT_URI="${NEW_REDIRECT_URI:-$CUR_REDIRECT_URI}"
+
+  # Validate
+  if [ -z "$NEW_CLIENT_ID" ] || [ -z "$NEW_CLIENT_SECRET" ] || [ -z "$NEW_REDIRECT_URI" ]; then
+    log_warn "Nicht alle Werte gesetzt — OAuth2 bleibt möglicherweise unvollständig konfiguriert."
+  fi
+
+  # Update .env: remove old OAuth2 lines (including commented-out)
+  sed -i '/^#\?\s*DISCORD_CLIENT_ID=/d' "$ENV_FILE"
+  sed -i '/^#\?\s*DISCORD_CLIENT_SECRET=/d' "$ENV_FILE"
+  sed -i '/^#\?\s*DISCORD_REDIRECT_URI=/d' "$ENV_FILE"
+  sed -i '/^# Discord OAuth2 (Login with Discord)$/d' "$ENV_FILE"
+
+  # Append new values
+  {
+    echo ""
+    echo "# Discord OAuth2 (Login with Discord)"
+    [ -n "$NEW_CLIENT_ID" ] && echo "DISCORD_CLIENT_ID=$NEW_CLIENT_ID" || echo "# DISCORD_CLIENT_ID="
+    [ -n "$NEW_CLIENT_SECRET" ] && echo "DISCORD_CLIENT_SECRET=$NEW_CLIENT_SECRET" || echo "# DISCORD_CLIENT_SECRET="
+    [ -n "$NEW_REDIRECT_URI" ] && echo "DISCORD_REDIRECT_URI=$NEW_REDIRECT_URI" || echo "# DISCORD_REDIRECT_URI="
+  } >> "$ENV_FILE"
+
+  log_ok "OAuth2-Werte in .env aktualisiert"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Backend jetzt neustarten damit die Änderungen wirksam werden? (j/n): ${NC}")" DO_RESTART
+  if [[ "$DO_RESTART" =~ ^[jJ]$ ]]; then
+    do_restart
+  else
+    log_warn "Änderungen werden erst nach einem Neustart wirksam: bash service.sh restart"
+  fi
+}
+
+# --------------------------------------------------
+# Security: Debug-Login Toggle
+# --------------------------------------------------
+do_toggle_debug_login() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  # Check current debug mode state
+  local STATUS_RESP
+  STATUS_RESP="$(curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  local CURRENT_DEBUG
+  CURRENT_DEBUG="$(echo "$STATUS_RESP" | grep -o '"debugMode":[a-z]*' | cut -d: -f2 || true)"
+
+  echo ""
+  if [ "$CURRENT_DEBUG" = "true" ]; then
+    log_warn "Debug-Modus ist AKTIV → POST /auth/login (direkter Login ohne OAuth) ist AKTIVIERT"
+  else
+    log_ok "Debug-Modus ist INAKTIV → POST /auth/login ist DEAKTIVIERT (nur OAuth2 Login)"
+  fi
+  echo ""
+  log_info "Der Debug-Login (POST /auth/login) erlaubt Login mit manueller Discord User ID + Guild ID."
+  log_info "Dies ist ein Sicherheitsrisiko und sollte nur für Tests verwendet werden."
+  log_warn "ACHTUNG: Debug-Login teilt den Debug-Modus-Schalter (DSGVO Compliance wird beeinflusst)."
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Debug-Modus (und damit Debug-Login) umschalten? (j/n): ${NC}")" TOGGLE
+  if [[ ! "$TOGGLE" =~ ^[jJ]$ ]]; then
+    log_info "Abgebrochen"
+    return
+  fi
+
+  local NEW_STATE="true"
+  [ "$CURRENT_DEBUG" = "true" ] && NEW_STATE="false"
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/debug" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "{\"enabled\":${NEW_STATE}}" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    if [ "$NEW_STATE" = "true" ]; then
+      log_warn "Debug-Modus AKTIVIERT → POST /auth/login ist jetzt erreichbar"
+      log_warn "DSGVO Compliance automatisch deaktiviert, Aufbewahrung: 7 Tage"
+    else
+      log_ok "Debug-Modus DEAKTIVIERT → POST /auth/login ist jetzt gesperrt (nur OAuth2)"
+    fi
+  else
+    log_error "Fehler beim Umschalten: $RESPONSE"
+  fi
+}
+
+# --------------------------------------------------
 # Interaktives Menü (Tools)
 # --------------------------------------------------
 do_menu() {
@@ -557,6 +675,9 @@ do_menu() {
     echo -e "${CYAN}41) Benutzer entbannen${NC}"
     echo -e "${CYAN}42) Banliste anzeigen${NC}"
     echo -e "${CYAN}43) Löschen und Bannen${NC}"
+    echo -e "${CYAN}--- Security ---${NC}"
+    echo -e "${CYAN}50) Debug-Login an/aus (POST /auth/login)${NC}"
+    echo -e "${CYAN}51) Discord OAuth2 Zugangsdaten ändern${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -676,6 +797,14 @@ do_menu() {
         ;;
       43)
         do_delete_and_ban
+        ;;
+
+      # --- Security ---
+      50)
+        do_toggle_debug_login
+        ;;
+      51)
+        do_update_oauth
         ;;
 
       0)

@@ -1,6 +1,7 @@
 <Window x:Class="CompanionApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:util="clr-namespace:CompanionApp.Utilities"
         Title="das-KRT Companion" Height="750" Width="950"
         MinHeight="650" MinWidth="850"
         WindowStartupLocation="CenterScreen"
@@ -148,6 +149,8 @@
 
     <!-- Boolean to Visibility Converter -->
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    <util:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis"/>
+    <util:StringToVisibilityConverter x:Key="StringToVis"/>
   </Window.Resources>
 
   <Grid>
@@ -813,36 +816,50 @@
                   </StackPanel>
                 </Border>
 
-                <!-- Discord Authentication (shown after policy acceptance) -->
+                <!-- Discord Login (shown after server verification) -->
                 <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,15"
-                        Visibility="{Binding CanLogin, Converter={StaticResource BoolToVis}}">
+                        Visibility="{Binding ServerVerifiedVisibility}">
                   <StackPanel>
                     <TextBlock Text="Authentication" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold" Margin="0,0,0,10"/>
                     
-                    <TextBlock Text="Discord User ID:" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding DiscordUserId, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
+                    <!-- Logged-in display -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8"
+                                Visibility="{Binding IsLoggedIn, Converter={StaticResource BoolToVis}}">
+                      <TextBlock Text="✓ Logged in as " Foreground="{StaticResource AccentGreen}" FontSize="12"/>
+                      <TextBlock Text="{Binding LoggedInDisplayName}" Foreground="{StaticResource AccentGreen}" FontSize="12" FontWeight="SemiBold"/>
+                    </StackPanel>
 
-                    <TextBlock Text="Guild ID (Discord Server):" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding GuildId, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}"/>
+                    <!-- Hint when button is disabled -->
+                    <TextBlock Text="{Binding DiscordLoginHint}" Foreground="#FF8866" FontSize="11" Margin="0,0,0,8"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding CanLoginWithDiscord, Converter={StaticResource InverseBoolToVis}}"/>
+
+                    <!-- OAuth login status -->
+                    <TextBlock Text="{Binding OAuthLoginStatus}" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,8"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding OAuthLoginStatus, Converter={StaticResource StringToVis}}"/>
+
+                    <!-- Login with Discord button -->
+                    <Button Content="Login with Discord" Style="{StaticResource ModernButton}"
+                            Click="LoginWithDiscord_Click"
+                            IsEnabled="{Binding CanLoginWithDiscord}"
+                            HorizontalAlignment="Left" Margin="0,0,0,8"/>
+
+                    <!-- Voice connect/disconnect -->
+                    <Button Content="{Binding VoiceConnectButtonText}" Style="{StaticResource ModernButton}" 
+                            Click="VoiceConnect_Click" HorizontalAlignment="Left"
+                            Visibility="{Binding IsLoggedIn, Converter={StaticResource BoolToVis}}"
+                            IsEnabled="{Binding IsLoggedIn}"/>
                   </StackPanel>
                 </Border>
-
-                <Button Content="{Binding VoiceConnectButtonText}" Style="{StaticResource ModernButton}" 
-                        Click="VoiceConnect_Click" HorizontalAlignment="Left"
-                        IsEnabled="{Binding CanLogin}"/>
               </StackPanel>
             </Border>
 
-            <!-- Backend Server -->
-            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20">
+            <!-- Debug Settings (only visible when server debug mode is active) -->
+            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20"
+                    Visibility="{Binding ServerDebugMode, Converter={StaticResource BoolToVis}}">
               <StackPanel>
-                <TextBlock Text="Backend Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,15"/>
-                
-                <TextBlock Text="Server Base URL" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                <TextBox Text="{Binding ServerBaseUrl, UpdateSourceTrigger=PropertyChanged}" 
-                         Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
+                <TextBlock Text="Debug Settings" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,15"/>
 
                 <TextBlock Text="Admin Token" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <TextBox Text="{Binding AdminToken, UpdateSourceTrigger=PropertyChanged}" 

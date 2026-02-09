@@ -45,13 +45,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     #region Server Settings
 
-    private string _serverBaseUrl = "";
-    public string ServerBaseUrl
-    {
-        get => _serverBaseUrl;
-        set { _serverBaseUrl = value; OnPropertyChanged(); }
-    }
-
     private string _adminToken = "";
     public string AdminToken
     {
@@ -114,7 +107,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public bool IsServerVerified
     {
         get => _isServerVerified;
-        set { _isServerVerified = value; OnPropertyChanged(); OnPropertyChanged(nameof(ServerVerifiedVisibility)); }
+        set { _isServerVerified = value; OnPropertyChanged(); OnPropertyChanged(nameof(ServerVerifiedVisibility)); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
     }
 
     public Visibility ServerVerifiedVisibility => IsServerVerified ? Visibility.Visible : Visibility.Collapsed;
@@ -165,11 +158,57 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public bool PolicyAccepted
     {
         get => _policyAccepted;
-        set { _policyAccepted = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); }
+        set { _policyAccepted = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
     }
 
     public bool PolicyNeedsAcceptance => IsServerVerified && !PolicyAccepted;
     public bool CanLogin => IsServerVerified && PolicyAccepted;
+
+    private bool _oauthEnabled;
+    public bool OauthEnabled
+    {
+        get => _oauthEnabled;
+        set { _oauthEnabled = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
+    }
+
+    /// <summary>True when user can click "Login with Discord".</summary>
+    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress;
+
+    /// <summary>Hint text shown when button is disabled.</summary>
+    public string DiscordLoginHint
+    {
+        get
+        {
+            if (!IsServerVerified) return "";
+            if (!OauthEnabled) return "Server does not have Discord OAuth configured.";
+            if (!PolicyAccepted) return "Accept the privacy policy to enable login.";
+            if (_isOAuthInProgress) return "Login in progress…";
+            return "";
+        }
+    }
+
+    private bool _isOAuthInProgress;
+    public bool IsOAuthInProgress
+    {
+        get => _isOAuthInProgress;
+        set { _isOAuthInProgress = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
+    }
+
+    private string _oauthLoginStatus = "";
+    public string OAuthLoginStatus
+    {
+        get => _oauthLoginStatus;
+        set { _oauthLoginStatus = value; OnPropertyChanged(); }
+    }
+
+    private string _loggedInDisplayName = "";
+    public string LoggedInDisplayName
+    {
+        get => _loggedInDisplayName;
+        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); }
+    }
+
+    public bool IsLoggedIn => !string.IsNullOrEmpty(LoggedInDisplayName);
 
     public string DsgvoStatusText => ServerDsgvoEnabled ? "DSGVO: Enabled" : "DSGVO: Disabled";
     public string DsgvoStatusColor => ServerDsgvoEnabled ? "#4AFF9E" : "#FF4A4A";
@@ -625,6 +664,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ServerDebugMode = status.DebugMode;
             ServerRetentionDays = status.RetentionDays;
             ServerPolicyVersion = status.PolicyVersion;
+            OauthEnabled = status.OauthEnabled;
 
             var policy = await BackendClient.GetPrivacyPolicyAsync(baseUrl);
             PrivacyPolicyText = policy?.Text ?? "Could not fetch privacy policy.";
@@ -637,7 +677,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             IsServerVerified = true;
             VerifyStatusText = $"Server verified: {status.Version}";
-            LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode}");
+            LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode} oauth={status.OauthEnabled}");
         }
         catch (Exception ex)
         {
@@ -674,63 +714,110 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>
-    /// Login to the server and get an auth token. Requires server verification and policy acceptance.
+    /// Login via Discord OAuth2. Opens browser, polls for token.
     /// </summary>
-    public async Task<bool> LoginAndConnectAsync()
+    public async Task<bool> LoginWithDiscordAsync()
     {
         if (!IsServerVerified)
         {
-            StatusText = "Please verify the server first";
+            OAuthLoginStatus = "Please verify the server first";
             return false;
         }
 
         if (!PolicyAccepted)
         {
-            StatusText = "Please accept the privacy policy first";
+            OAuthLoginStatus = "Please accept the privacy policy first";
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(DiscordUserId) || string.IsNullOrWhiteSpace(GuildId))
+        if (!OauthEnabled)
         {
-            StatusText = "Please enter Discord User ID and Guild ID";
+            OAuthLoginStatus = "Server does not have Discord OAuth configured";
             return false;
         }
 
-        StatusText = "Logging in...";
+        IsOAuthInProgress = true;
+        OAuthLoginStatus = "Opening browser for Discord login…";
+
         var baseUrl = BuildBaseUrl();
+        var state = Guid.NewGuid().ToString("N");
 
         try
         {
-            using var client = new BackendClient(baseUrl, AdminToken);
-            var loginResult = await client.LoginAsync(DiscordUserId, GuildId);
+            // Open browser to backend's OAuth redirect endpoint
+            var redirectUrl = $"{baseUrl}/auth/discord/redirect?state={Uri.EscapeDataString(state)}";
+            Process.Start(new ProcessStartInfo(redirectUrl) { UseShellExecute = true });
 
-            if (loginResult == null)
+            // Poll for result (every 2 seconds, up to 3 minutes)
+            OAuthLoginStatus = "Waiting for Discord authorization…";
+            var timeout = DateTime.UtcNow.AddMinutes(3);
+
+            while (DateTime.UtcNow < timeout)
             {
-                StatusText = "Login failed - user not found or access denied";
-                return false;
+                await Task.Delay(2000);
+
+                var result = await BackendClient.PollOAuthTokenAsync(baseUrl, state);
+                if (result == null) continue;
+
+                if (result.Status == "pending") continue;
+
+                if (result.Status == "error")
+                {
+                    var errorMsg = result.Error switch
+                    {
+                        "not_in_guild" => "You are not a member of the allowed Discord server.",
+                        "no_guild" => "No matching guilds found.",
+                        "banned" => "Your account has been banned.",
+                        _ => $"Login error: {result.Error}"
+                    };
+                    OAuthLoginStatus = errorMsg;
+                    LogDebug($"[OAuth] Error: {result.Error}");
+                    return false;
+                }
+
+                if (result.Status == "success" && !string.IsNullOrEmpty(result.Token))
+                {
+                    AuthToken = result.Token;
+                    LoggedInDisplayName = result.DisplayName ?? "";
+
+                    // Accept policy on server if needed
+                    if (!result.PolicyAccepted && !string.IsNullOrEmpty(AuthToken))
+                    {
+                        using var client = new BackendClient(baseUrl, AdminToken);
+                        client.SetAuthToken(AuthToken);
+                        await client.AcceptPolicyAsync(result.PolicyVersion ?? ServerPolicyVersion);
+                    }
+
+                    OAuthLoginStatus = $"Logged in as {LoggedInDisplayName}";
+                    StatusText = $"Logged in as {LoggedInDisplayName}";
+                    LogDebug($"[OAuth] Login OK: {LoggedInDisplayName}");
+                    MarkGlobalChanged();
+
+                    // Auto-connect voice
+                    await ConnectVoiceAsync();
+                    return true;
+                }
+
+                if (result.Status == "unknown")
+                {
+                    // State expired or was never registered
+                    OAuthLoginStatus = "Login session expired. Please try again.";
+                    return false;
+                }
             }
 
-            AuthToken = loginResult.Token;
-
-            // Accept policy on server if needed
-            if (!loginResult.PolicyAccepted && !string.IsNullOrEmpty(AuthToken))
-            {
-                client.SetAuthToken(AuthToken);
-                await client.AcceptPolicyAsync(loginResult.PolicyVersion);
-            }
-
-            StatusText = $"Logged in as {loginResult.DisplayName}";
-            LogDebug($"[Auth] Login OK: {loginResult.DisplayName}");
-
-            // Now connect voice with the auth token
-            await ConnectVoiceAsync();
-            return true;
+            OAuthLoginStatus = "Login timed out. Please try again.";
+            return false;
         }
         catch (Exception ex)
         {
-            StatusText = $"Login error: {ex.Message}";
-            LogDebug($"[Auth] Login failed: {ex.Message}");
+            OAuthLoginStatus = $"Login error: {ex.Message}";
+            LogDebug($"[OAuth] Error: {ex.Message}");
             return false;
+        }
+        finally
+        {
+            IsOAuthInProgress = false;
         }
     }
 
@@ -962,8 +1049,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _config = config;
 
-        ServerBaseUrl = config.ServerBaseUrl;
-        AdminToken = config.AdminToken;
         DiscordUserId = config.DiscordUserId;
         GuildId = config.GuildId;
         SampleRate = config.SampleRate;
@@ -1092,8 +1177,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyToConfig()
     {
-        _config.ServerBaseUrl = ServerBaseUrl;
-        _config.AdminToken = AdminToken;
         _config.DiscordUserId = DiscordUserId;
         _config.GuildId = GuildId;
         _config.SampleRate = SampleRate;

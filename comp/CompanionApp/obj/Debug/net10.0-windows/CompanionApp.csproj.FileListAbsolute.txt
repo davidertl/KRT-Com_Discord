@@ -28,3 +28,5 @@ c:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\D
 c:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\Debug\net10.0-windows\CompanionApp.pdb
 c:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\Debug\net10.0-windows\CompanionApp.genruntimeconfig.cache
 c:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\Debug\net10.0-windows\ref\CompanionApp.dll
+C:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\Debug\net10.0-windows\GeneratedInternalTypeHelper.g.cs
+C:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\obj\Debug\net10.0-windows\CompanionApp_MarkupCompile.lref

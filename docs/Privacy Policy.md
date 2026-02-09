@@ -33,6 +33,7 @@ After reading and accepting the terms and privacy policy, the user can choose to
 ### 2.1 User Identifiers
 
 - **Discord OAuth2**: When logging in, the server requests Discord `identify` and `guilds` scopes via OAuth2 authorization code flow. This provides the user's Discord ID, display name, and guild memberships. The Discord access token is **immediately revoked** after use — the server does not retain long-term access to the user's Discord account.
+- **User ID Hashing**: Raw Discord User IDs (snowflake IDs) are **never stored** in the database. All user identifiers are hashed using HMAC-SHA256 before persistence. This means that even if the database were compromised, the stored hashes cannot be reversed to obtain the original Discord User IDs without access to the server's secret key.
 - Discord display names (server nicknames only, changeable by user) are stored for display purposes but are not used for authentication. Old usernames are not stored — only the latest nickname is kept.
 - Guild IDs are stored for frequency mapping and access control. They are used to determine if a user is allowed to connect to the voice server and to which frequencies they have access.
 - Guild roles will be stored for ACL purposes in a future update. Only the latest rank/role is stored.
@@ -115,7 +116,7 @@ A **hard delete** can be executed for any User ID, removing:
 - Channel and radio mappings
 - Policy acceptance records
 
-Deletion is **irreversible** and should be used with caution. The administrator can set a ban for the user, so that the user cannot log in again after deletion. This prevents the user from creating a new session and generating new data. The ban is stored in a separate table with only the user ID and timestamp, containing no personal data.
+Deletion is **irreversible** and should be used with caution. The administrator can set a ban for the user, so that the user cannot log in again after deletion. This prevents the user from creating a new session and generating new data. The ban is stored in a separate table with the hashed user ID, the raw user ID (for admin identification), and a timestamp.
 
 ---
 
@@ -126,7 +127,8 @@ A full deletion operation technically results in:
 - Automatic addition of the User ID to a **ban list**
 
 The ban list stores **minimal information only**:
-- Discord User ID (or hash)
+- Hashed Discord User ID (HMAC-SHA256, irreversible)
+- Raw Discord User ID (for administrator identification purposes)
 - Timestamp
 - Optional reason
 

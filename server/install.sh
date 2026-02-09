@@ -463,12 +463,84 @@ const { createMappingStore } = require('./src/mapping');
 const { createStateStore } = require('./src/state');
 const { createVoiceRelay } = require('./src/voice');
 const { createDsgvo } = require('./src/dsgvo');
+const { hashUserId } = require('./src/crypto');
 const fs = require('fs');
 
 function mustEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
+}
+
+/**
+ * One-time migration: hash all existing raw Discord user IDs in every table.
+ * Idempotent — skips rows that are already 64-char hex (hashed).
+ */
+function migrateUserIdHashing(db) {
+  // 1. Ensure raw_discord_id column exists on banned_users (for fresh vs upgraded DBs)
+  const cols = db.prepare('PRAGMA table_info(banned_users)').all();
+  if (!cols.some(c => c.name === 'raw_discord_id')) {
+    db.exec('ALTER TABLE banned_users ADD COLUMN raw_discord_id TEXT');
+    console.log('[migration] Added raw_discord_id column to banned_users');
+  }
+
+  // 2. Check if migration is needed (heuristic: raw Discord snowflakes are 17-20 decimal digits)
+  const tables = ['voice_state', 'tx_events', 'discord_users', 'freq_listeners', 'voice_sessions', 'auth_tokens', 'policy_acceptance'];
+  let needsMigration = false;
+  for (const table of tables) {
+    const sample = db.prepare(`SELECT discord_user_id FROM ${table} WHERE discord_user_id IS NOT NULL LIMIT 1`).get();
+    if (sample && !/^[0-9a-f]{64}$/.test(sample.discord_user_id)) {
+      needsMigration = true;
+      break;
+    }
+  }
+
+  // Also check banned_users
+  const bannedSample = db.prepare('SELECT discord_user_id FROM banned_users LIMIT 1').get();
+  if (bannedSample && !/^[0-9a-f]{64}$/.test(bannedSample.discord_user_id)) {
+    needsMigration = true;
+  }
+
+  if (!needsMigration) {
+    console.log('[migration] User ID hashing: no migration needed');
+    return;
+  }
+
+  console.log('[migration] Hashing existing raw discord_user_id values...');
+
+  // 3. Migrate each standard table
+  for (const table of tables) {
+    const rows = db.prepare(`SELECT DISTINCT discord_user_id FROM ${table} WHERE discord_user_id IS NOT NULL`).all();
+    let migrated = 0;
+    const migrate = db.transaction(() => {
+      for (const row of rows) {
+        const raw = row.discord_user_id;
+        if (/^[0-9a-f]{64}$/.test(raw)) continue; // already hashed
+        const hashed = hashUserId(raw);
+        db.prepare(`UPDATE ${table} SET discord_user_id = ? WHERE discord_user_id = ?`).run(hashed, raw);
+        migrated++;
+      }
+    });
+    migrate();
+    if (migrated > 0) console.log(`[migration]   ${table}: hashed ${migrated} user IDs`);
+  }
+
+  // 4. Migrate banned_users (preserve raw ID for admin display)
+  const bannedRows = db.prepare('SELECT discord_user_id, banned_at_ms, reason FROM banned_users').all();
+  let bannedMigrated = 0;
+  const migrateBanned = db.transaction(() => {
+    for (const row of bannedRows) {
+      const raw = row.discord_user_id;
+      if (/^[0-9a-f]{64}$/.test(raw)) continue;
+      const hashed = hashUserId(raw);
+      db.prepare('UPDATE banned_users SET discord_user_id = ?, raw_discord_id = ? WHERE discord_user_id = ?').run(hashed, raw, raw);
+      bannedMigrated++;
+    }
+  });
+  migrateBanned();
+  if (bannedMigrated > 0) console.log(`[migration]   banned_users: hashed ${bannedMigrated} entries (raw IDs preserved)`);
+
+  console.log('[migration] User ID hashing migration complete');
 }
 
 (async () => {
@@ -479,6 +551,10 @@ function mustEnv(name) {
   const mapPath = mustEnv('CHANNEL_MAP_PATH');
 
   const db = initDb(dbPath);
+
+  // Run one-time user-ID hashing migration (idempotent)
+  migrateUserIdHashing(db);
+
   const mapping = createMappingStore(mapPath);
   const stateStore = createStateStore(db);
   const txStore = createTxStore(db);
@@ -681,6 +757,7 @@ function initDb(dbPath) {
     -- Banned users (minimal: user ID + timestamp + optional reason)
     CREATE TABLE IF NOT EXISTS banned_users (
       discord_user_id TEXT PRIMARY KEY,
+      raw_discord_id  TEXT,
       banned_at_ms    INTEGER NOT NULL,
       reason          TEXT
     );
@@ -796,7 +873,7 @@ write_file_backup "$SRC_DIR/voice.js" "$(cat <<'EOF'
 
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
-const { verifyToken } = require('./crypto');
+const { verifyToken, hashUserId } = require('./crypto');
 
 /**
  * Voice Relay
@@ -933,6 +1010,13 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     if (!resolvedUserId || !resolvedGuildId) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'missing credentials' }));
       return;
+    }
+
+    // When no signed token was used, the resolvedUserId is a raw Discord snowflake.
+    // Hash it so all downstream code (sessions, DB, ban checks) uses the hashed form.
+    // When a signed token WAS used, payload.uid is already hashed.
+    if (!(authToken && tokenSecret)) {
+      resolvedUserId = hashUserId(String(resolvedUserId));
     }
 
     // Check allowed guilds
@@ -1244,7 +1328,18 @@ function generateSessionToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-module.exports = { signToken, verifyToken, generateSessionToken };
+/**
+ * Hash a Discord user ID using HMAC-SHA256 for privacy-safe storage.
+ * Raw Discord snowflake IDs are never stored in the database — only these
+ * 64-character hex digests.  The HMAC key is TOKEN_SECRET from the .env file.
+ */
+function hashUserId(rawDiscordId) {
+  const secret = process.env.TOKEN_SECRET;
+  if (!secret) throw new Error('TOKEN_SECRET not set — cannot hash user ID');
+  return crypto.createHmac('sha256', secret).update(String(rawDiscordId)).digest('hex');
+}
+
+module.exports = { signToken, verifyToken, generateSessionToken, hashUserId };
 EOF
 )"
 
@@ -1423,6 +1518,7 @@ write_file_backup "$SRC_DIR/discord.js" "$(cat <<'EOF'
 'use strict';
 
 const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
+const { hashUserId } = require('./crypto');
 
 function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onStateChange, channelSyncIntervalHours = 24 }) {
   // Wichtig: "Server Members Intent" muss im Discord Developer Portal aktiviert sein,
@@ -1476,8 +1572,9 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
         for (const [memberId, member] of members) {
           if (member.user.bot) continue;
           const displayName = member.nickname || member.displayName || member.user.username;
+          const hashedId = hashUserId(String(memberId));
           usersStore.upsert({
-            discord_user_id: String(memberId),
+            discord_user_id: hashedId,
             guild_id: String(guild.id),
             display_name: String(displayName),
             updated_at_ms: now,
@@ -1517,8 +1614,9 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     if (guildId && member.guild.id !== guildId) return;
     if (!usersStore) return;
     const displayName = member.nickname || member.displayName || member.user.username;
+    const hashedId = hashUserId(String(member.id));
     usersStore.upsert({
-      discord_user_id: String(member.id),
+      discord_user_id: hashedId,
       guild_id: String(member.guild.id),
       display_name: String(displayName),
       updated_at_ms: Date.now(),
@@ -1533,8 +1631,9 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     const oldName = oldMember.nickname || oldMember.displayName;
     const newName = newMember.nickname || newMember.displayName || newMember.user.username;
     if (oldName !== newName) {
+      const hashedId = hashUserId(String(newMember.id));
       usersStore.upsert({
-        discord_user_id: String(newMember.id),
+        discord_user_id: hashedId,
         guild_id: String(newMember.guild.id),
         display_name: String(newName),
         updated_at_ms: Date.now(),
@@ -1552,8 +1651,11 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
       const channelId = newState.channelId;
       const freqId = channelId ? mapping.getFreqIdForChannelId(channelId) : null;
 
+      // Hash the raw Discord user ID before storing or broadcasting
+      const hashedUserId = hashUserId(String(discordUserId));
+
       const payload = {
-        discordUserId,
+        discordUserId: hashedUserId,
         guildId: gId,
         channelId: channelId || null,
         freqId: freqId || null,
@@ -1562,7 +1664,7 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
 
       // Voice state persist
       stateStore.upsert({
-        discord_user_id: payload.discordUserId,
+        discord_user_id: hashedUserId,
         guild_id: payload.guildId,
         channel_id: payload.channelId,
         freq_id: payload.freqId,
@@ -1576,7 +1678,7 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
         const displayName = (m && (m.nickname || m.displayName)) ? String(m.nickname || m.displayName) : null;
         if (displayName) {
           usersStore.upsert({
-            discord_user_id: payload.discordUserId,
+            discord_user_id: hashedUserId,
             guild_id: payload.guildId,
             display_name: displayName,
             updated_at_ms: payload.ts,
@@ -1643,15 +1745,16 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
       const member = await guild.members.fetch(discordUserId).catch(() => null);
       if (!member || member.user.bot) return null;
       const displayName = member.nickname || member.displayName || member.user.username;
+      const hashedId = hashUserId(String(discordUserId));
       if (usersStore) {
         usersStore.upsert({
-          discord_user_id: String(discordUserId),
+          discord_user_id: hashedId,
           guild_id: String(resolvedGuildId),
           display_name: String(displayName),
           updated_at_ms: Date.now(),
         });
       }
-      return { discordUserId: String(discordUserId), guildId: String(resolvedGuildId), displayName: String(displayName) };
+      return { discordUserId: hashedId, guildId: String(resolvedGuildId), displayName: String(displayName) };
     } catch (e) {
       console.error('[discord] fetchGuildMember error:', e.message);
       return null;
@@ -1745,26 +1848,31 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
 
   /**
    * Delete all data for a specific Discord user across all tables.
+   * @param {string} hashedUserId  Pre-hashed discord user ID (64-char hex)
    */
-  function deleteUser(discordUserId) {
-    const uid = String(discordUserId);
+  function deleteUser(hashedUserId) {
+    const uid = String(hashedUserId);
     const deleted = {
       voice_state: 0,
       tx_events: 0,
       discord_users: 0,
       freq_listeners: 0,
       voice_sessions: 0,
+      auth_tokens: 0,
+      policy_acceptance: 0,
     };
 
-    deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE discord_user_id = ?').run(uid).changes;
-    deleted.tx_events      = db.prepare('DELETE FROM tx_events WHERE discord_user_id = ?').run(uid).changes;
-    deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE discord_user_id = ?').run(uid).changes;
-    deleted.freq_listeners = db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ?').run(uid).changes;
-    deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE discord_user_id = ?').run(uid).changes;
+    deleted.voice_state       = db.prepare('DELETE FROM voice_state WHERE discord_user_id = ?').run(uid).changes;
+    deleted.tx_events         = db.prepare('DELETE FROM tx_events WHERE discord_user_id = ?').run(uid).changes;
+    deleted.discord_users     = db.prepare('DELETE FROM discord_users WHERE discord_user_id = ?').run(uid).changes;
+    deleted.freq_listeners    = db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ?').run(uid).changes;
+    deleted.voice_sessions    = db.prepare('DELETE FROM voice_sessions WHERE discord_user_id = ?').run(uid).changes;
+    deleted.auth_tokens       = db.prepare('DELETE FROM auth_tokens WHERE discord_user_id = ?').run(uid).changes;
+    deleted.policy_acceptance = db.prepare('DELETE FROM policy_acceptance WHERE discord_user_id = ?').run(uid).changes;
 
     const total = Object.values(deleted).reduce((a, b) => a + b, 0);
-    console.log(`[dsgvo] Deleted ${total} rows for user ${uid}`, deleted);
-    return { discordUserId: uid, deleted, totalRows: total };
+    console.log(`[dsgvo] Deleted ${total} rows for user ${uid.substring(0, 12)}...`, deleted);
+    return { hashedUserId: uid, deleted, totalRows: total };
   }
 
   /**
@@ -1896,54 +2004,58 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   }
 
   // --- Ban management ---
+  // All functions receive pre-hashed discord user IDs.
+  // banUser additionally stores the raw ID for admin display.
 
-  function banUser(discordUserId, reason) {
-    const uid = String(discordUserId);
+  function banUser(hashedUserId, rawUserId, reason) {
+    const hid = String(hashedUserId);
     db.prepare(
-      'INSERT OR REPLACE INTO banned_users (discord_user_id, banned_at_ms, reason) VALUES (?, ?, ?)'
-    ).run(uid, Date.now(), reason || null);
-    console.log('[dsgvo] Banned user', uid);
+      'INSERT OR REPLACE INTO banned_users (discord_user_id, raw_discord_id, banned_at_ms, reason) VALUES (?, ?, ?, ?)'
+    ).run(hid, rawUserId ? String(rawUserId) : null, Date.now(), reason || null);
+    console.log('[dsgvo] Banned user', hid.substring(0, 12) + '...');
   }
 
-  function unbanUser(discordUserId) {
-    const uid = String(discordUserId);
-    const result = db.prepare('DELETE FROM banned_users WHERE discord_user_id = ?').run(uid);
-    console.log('[dsgvo] Unbanned user', uid, 'rows:', result.changes);
+  function unbanUser(hashedUserId) {
+    const hid = String(hashedUserId);
+    const result = db.prepare('DELETE FROM banned_users WHERE discord_user_id = ?').run(hid);
+    console.log('[dsgvo] Unbanned user', hid.substring(0, 12) + '...', 'rows:', result.changes);
     return result.changes > 0;
   }
 
-  function isBanned(discordUserId) {
-    const row = db.prepare('SELECT 1 FROM banned_users WHERE discord_user_id = ?').get(String(discordUserId));
+  function isBanned(hashedUserId) {
+    const row = db.prepare('SELECT 1 FROM banned_users WHERE discord_user_id = ?').get(String(hashedUserId));
     return !!row;
   }
 
   function listBanned() {
-    return db.prepare('SELECT discord_user_id, banned_at_ms, reason FROM banned_users ORDER BY banned_at_ms DESC').all();
+    return db.prepare('SELECT discord_user_id, raw_discord_id, banned_at_ms, reason FROM banned_users ORDER BY banned_at_ms DESC').all();
   }
 
   /**
    * Delete all user data and add to ban list (prevents re-registration).
+   * @param {string} hashedUserId  Pre-hashed discord user ID
+   * @param {string} rawUserId     Raw discord user ID (for admin display)
    */
-  function deleteAndBanUser(discordUserId, reason) {
-    const deleteResult = deleteUser(discordUserId);
-    banUser(discordUserId, reason || 'data deletion');
+  function deleteAndBanUser(hashedUserId, rawUserId, reason) {
+    const deleteResult = deleteUser(hashedUserId);
+    banUser(hashedUserId, rawUserId, reason || 'data deletion');
     return { ...deleteResult, banned: true };
   }
 
   // --- Policy acceptance ---
 
-  function hasPolicyAcceptance(discordUserId, policyVersion) {
+  function hasPolicyAcceptance(hashedUserId, policyVersion) {
     const row = db.prepare(
       'SELECT 1 FROM policy_acceptance WHERE discord_user_id = ? AND policy_version = ?'
-    ).get(String(discordUserId), String(policyVersion));
+    ).get(String(hashedUserId), String(policyVersion));
     return !!row;
   }
 
-  function acceptPolicy(discordUserId, policyVersion) {
+  function acceptPolicy(hashedUserId, policyVersion) {
     db.prepare(
       'INSERT OR REPLACE INTO policy_acceptance (discord_user_id, policy_version, accepted_at_ms) VALUES (?, ?, ?)'
-    ).run(String(discordUserId), String(policyVersion), Date.now());
-    console.log('[dsgvo] User', discordUserId, 'accepted policy version', policyVersion);
+    ).run(String(hashedUserId), String(policyVersion), Date.now());
+    console.log('[dsgvo] User', String(hashedUserId).substring(0, 12) + '...', 'accepted policy version', policyVersion);
   }
 
   return {
@@ -2001,7 +2113,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     next();
   });
 
-  const { signToken, verifyToken } = require('./crypto');
+  const { signToken, verifyToken, hashUserId } = require('./crypto');
 
   let onTxEventFn = null;
   let _bot = bot;
@@ -2074,24 +2186,27 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId or guildId' });
     }
 
+    // Hash the raw Discord ID — raw IDs are never stored
+    const hashedId = hashUserId(discordUserId);
+
     // Check allowed guilds
     if (allowedGuildIds.length > 0 && !allowedGuildIds.includes(String(guildId))) {
       return res.status(403).json({ ok: false, error: 'guild not allowed' });
     }
 
     // Check if banned
-    if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(String(discordUserId))) {
+    if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(hashedId)) {
       return res.status(403).json({ ok: false, error: 'access denied' });
     }
 
     // Look up user in local cache
-    let user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : null;
+    let user = usersStore ? usersStore.get(hashedId, String(guildId)) : null;
 
     // Fallback: live Discord API lookup if not in cache
     if (!user && _bot && typeof _bot.fetchGuildMember === 'function') {
       const fetched = await _bot.fetchGuildMember(String(discordUserId), String(guildId));
       if (fetched) {
-        user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : { display_name: fetched.displayName };
+        user = usersStore ? usersStore.get(hashedId, String(guildId)) : { display_name: fetched.displayName };
       }
     }
 
@@ -2101,27 +2216,27 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
     // Check policy acceptance
     const policyAccepted = dsgvo
-      ? dsgvo.hasPolicyAcceptance(String(discordUserId), policyVersion || '1.0')
+      ? dsgvo.hasPolicyAcceptance(hashedId, policyVersion || '1.0')
       : true;
 
     if (!tokenSecret) {
       return res.status(500).json({ ok: false, error: 'server token secret not configured' });
     }
 
-    // Issue signed token (24h expiry)
+    // Issue signed token (24h expiry) — uid is the hashed ID
     const payload = {
-      uid: String(discordUserId),
+      uid: hashedId,
       gid: String(guildId),
-      name: user.display_name || String(discordUserId),
+      name: user.display_name || hashedId.substring(0, 12) + '...',
       iat: Date.now(),
       exp: Date.now() + 24 * 60 * 60 * 1000,
     };
     const token = signToken(payload, tokenSecret);
 
-    // Store token reference in DB
+    // Store token reference in DB (hashed user ID)
     db.prepare(
       'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
-    ).run(token.substring(0, 64), String(discordUserId), String(guildId), payload.name, payload.iat, payload.exp);
+    ).run(token.substring(0, 64), hashedId, String(guildId), payload.name, payload.iat, payload.exp);
 
     res.json({
       ok: true,
@@ -2216,6 +2331,9 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       const discordUserId = discordUser.id;
       const discordUsername = discordUser.global_name || discordUser.username || discordUser.id;
 
+      // Hash the raw Discord ID — raw IDs are never stored in the database
+      const hashedId = hashUserId(discordUserId);
+
       // Fetch user guilds to find matching guild
       const guildsResp = await fetch('https://discord.com/api/v10/users/@me/guilds', {
         headers: { Authorization: 'Bearer ' + discordAccessToken },
@@ -2247,8 +2365,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>No guilds found for your account.</p><p style="color:#888">You can close this window.</p></body></html>');
       }
 
-      // Check ban
-      if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(String(discordUserId))) {
+      // Check ban (using hashed ID)
+      if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(hashedId)) {
         pendingOAuth.set(state, { error: 'banned', timestamp: Date.now() });
         return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Access Denied</h2><p>Your account has been banned from this server.</p><p style="color:#888">You can close this window.</p></body></html>');
       }
@@ -2260,9 +2378,9 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         if (member) displayName = member.displayName;
       }
 
-      // Issue signed auth token
+      // Issue signed auth token (uid = hashed ID)
       const authPayload = {
-        uid: String(discordUserId),
+        uid: hashedId,
         gid: matchedGuildId,
         name: displayName,
         iat: Date.now(),
@@ -2270,10 +2388,10 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       };
       const authToken = signToken(authPayload, tokenSecret);
 
-      // Store token in DB
+      // Store token in DB (hashed user ID)
       db.prepare(
         'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
-      ).run(authToken.substring(0, 64), String(discordUserId), matchedGuildId, displayName, authPayload.iat, authPayload.exp);
+      ).run(authToken.substring(0, 64), hashedId, matchedGuildId, displayName, authPayload.iat, authPayload.exp);
 
       // Store result for companion app polling
       // NOTE: Do NOT store raw discordUserId/guildId — the signed token contains all needed info
@@ -2281,7 +2399,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         token: authToken,
         displayName,
         policyVersion: policyVersion || '1.0',
-        policyAccepted: dsgvo ? dsgvo.hasPolicyAcceptance(String(discordUserId), policyVersion || '1.0') : true,
+        policyAccepted: dsgvo ? dsgvo.hasPolicyAcceptance(hashedId, policyVersion || '1.0') : true,
         timestamp: Date.now(),
       });
 
@@ -2299,7 +2417,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         });
       } catch (e) { console.warn('[oauth] Token revoke failed:', e.message); }
 
-      console.log('[oauth] Login OK: ' + discordUserId + ' (' + displayName + ') in guild ' + matchedGuildId);
+      console.log('[oauth] Login OK: ' + hashedId.substring(0, 12) + '... (' + displayName + ') in guild ' + matchedGuildId);
       res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>&#10003; Login Successful</h2><p style="color:#ccc">Welcome, <strong>' + displayName + '</strong></p><p style="color:#888">You can close this window and return to the Companion App.</p></body></html>');
     } catch (e) {
       console.error('[oauth] Callback error:', e);
@@ -2341,7 +2459,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   app.get('/state/:discordUserId', (req, res) => {
-    const row = stateStore.get(req.params.discordUserId);
+    const hashedId = hashUserId(req.params.discordUserId);
+    const row = stateStore.get(hashedId);
     res.json({ ok: true, data: row });
   });
 
@@ -2367,9 +2486,11 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
     const ts = Date.now();
 
+    const hashedUid = discordUserId ? hashUserId(discordUserId) : null;
+
     const row = {
       freq_id: f,
-      discord_user_id: discordUserId ? String(discordUserId) : null,
+      discord_user_id: hashedUid,
       radio_slot: (radioSlot === null || radioSlot === undefined) ? null : Number(radioSlot),
       action,
       ts_ms: ts,
@@ -2380,7 +2501,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
     const payload = {
       freqId: row.freq_id,
-      discordUserId: row.discord_user_id,
+      discordUserId: hashedUid,
       radioSlot: row.radio_slot,
       action: row.action,
       ts: row.ts_ms,
@@ -2414,9 +2535,10 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
     }
     const f = Number(freqId);
+    const hashedUid = hashUserId(discordUserId);
     db.prepare(
       'INSERT OR REPLACE INTO freq_listeners (discord_user_id, freq_id, radio_slot, connected_at_ms) VALUES (?,?,?,?)'
-    ).run(String(discordUserId), f, Number(radioSlot) || 0, Date.now());
+    ).run(hashedUid, f, Number(radioSlot) || 0, Date.now());
 
     const row = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
     res.json({ ok: true, listener_count: row ? row.cnt : 0 });
@@ -2428,7 +2550,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
     }
     const f = Number(freqId);
-    db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ? AND freq_id = ?').run(String(discordUserId), f);
+    const hashedUid = hashUserId(discordUserId);
+    db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ? AND freq_id = ?').run(hashedUid, f);
 
     const row = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
     res.json({ ok: true, listener_count: row ? row.cnt : 0 });
@@ -2443,7 +2566,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
   app.get('/users/:guildId/:discordUserId', (req, res) => {
     const { guildId, discordUserId } = req.params;
-    const row = (usersStore && typeof usersStore.get === 'function') ? usersStore.get(discordUserId, guildId) : null;
+    const hashedId = hashUserId(discordUserId);
+    const row = (usersStore && typeof usersStore.get === 'function') ? usersStore.get(hashedId, guildId) : null;
     res.json({ ok: true, data: row });
   });
 
@@ -2503,7 +2627,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (!discordUserId) {
       return res.status(400).json({ ok: false, error: 'missing discordUserId' });
     }
-    const result = dsgvo.deleteUser(String(discordUserId));
+    const hashedId = hashUserId(String(discordUserId));
+    const result = dsgvo.deleteUser(hashedId);
     res.json({ ok: true, data: result });
   });
 
@@ -2574,7 +2699,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId' });
     }
     if (dsgvo && typeof dsgvo.banUser === 'function') {
-      dsgvo.banUser(String(discordUserId), reason || null);
+      const hashedId = hashUserId(String(discordUserId));
+      dsgvo.banUser(hashedId, String(discordUserId), reason || null);
       res.json({ ok: true });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });
@@ -2588,7 +2714,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId' });
     }
     if (dsgvo && typeof dsgvo.unbanUser === 'function') {
-      const removed = dsgvo.unbanUser(String(discordUserId));
+      const hashedId = hashUserId(String(discordUserId));
+      const removed = dsgvo.unbanUser(hashedId);
       res.json({ ok: true, data: { removed } });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });
@@ -2611,7 +2738,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'missing discordUserId' });
     }
     if (dsgvo && typeof dsgvo.deleteAndBanUser === 'function') {
-      const result = dsgvo.deleteAndBanUser(String(discordUserId), reason);
+      const hashedId = hashUserId(String(discordUserId));
+      const result = dsgvo.deleteAndBanUser(hashedId, String(discordUserId), reason);
       res.json({ ok: true, data: result });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });

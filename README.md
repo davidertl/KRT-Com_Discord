@@ -51,7 +51,6 @@ User sollen **parallel** mit mehreren Gruppen kommunizieren können, ohne den Vo
 
 ### ⏳ In Arbeit / Nächster Schritt
 
-* User-ID-Hashing in Datenbank
 * Notfall-Funk Erweiterungen (Caller-Anzeige, signifikante Beep-Sounds)
 * Ingame-Overlay
 
@@ -213,14 +212,18 @@ Wenn der Server-Admin Debug-Modus aktiviert hat (`service.sh` → 50):
 * `tx_events` – TX-Event-History
 * `voice_sessions` – Aktive WebSocket-Sessions
 * `freq_listeners` – Frequenz-Subscriber pro Session
-* `banned_users` – Gesperrte Nutzer (Discord User ID)
-* `auth_tokens` – Ausgestellte Auth-Tokens (Token ID, User, Expiry)
-* `policy_acceptance` – Datenschutz-Einwilligungen (User + Version)
-* `discord_users` – OAuth2 autorisierte User (Discord ID, Display Name)
+* `banned_users` – Gesperrte Nutzer (gehashte Discord User ID + raw ID für Admin-Anzeige)
+* `auth_tokens` – Ausgestellte Auth-Tokens (Token ID, gehashte User ID, Expiry)
+* `policy_acceptance` – Datenschutz-Einwilligungen (gehashte User ID + Version)
+* `discord_users` – OAuth2 autorisierte User (gehashte Discord ID, Display Name)
+
+> **Hinweis:** Alle `discord_user_id`-Spalten speichern ausschließlich HMAC-SHA256-Hashes (64 Zeichen Hex).
+> Rohe Discord Snowflake-IDs werden nirgends in der Datenbank persistiert (mit Ausnahme von `banned_users.raw_discord_id` für die Admin-Anzeige).
+> Bei einem Datenleck sind die User-IDs nicht rekonstruierbar.
 
 ---
 
-## Anforderungen
+## Pipeline
 
 ### Muss
 
@@ -232,14 +235,14 @@ Wenn der Server-Admin Debug-Modus aktiviert hat (`service.sh` → 50):
 * ✔ Discord Server-intern
 * ✔ Externer Debian Server
 
-### Soll
+### zeitnaher
 * ⏳ ACLs für Frequenzen
 * ⏳ Statusabhängige Erreichbarkeit
 
-### Kann
+### eher später
 
 * ⏳ Subgruppen/zusätzliche Verschlüsselung keyphrase hashing
-* ⏳ Externe Statusanzeige (z. B. Mumble)
+* ⏳ Externe Statusanzeige
 
 ---
 
@@ -251,6 +254,8 @@ Wenn der Server-Admin Debug-Modus aktiviert hat (`service.sh` → 50):
 * DSGVO-HTTPS-Enforcement (kein Klartext-Traffic bei aktivem Compliance-Modus)
 * Discord OAuth2 Login (Authorization Code Flow, keine Self-Reported Identity)
 * Token-basierte Auth (HMAC-SHA256, 24h Expiry)
+* **User-ID-Hashing** (HMAC-SHA256, alle Discord User IDs werden vor DB-Speicherung gehasht)
+* Automatische Datenmigration (bestehende Raw-IDs werden beim Start gehasht)
 * Server-seitige User-Verifizierung via Discord Bot
 * Debug-Login (POST /auth/login) nur im Debug-Modus verfügbar
 * OAuth Poll-Response enthält keine Raw-IDs (nur Token + DisplayName)
@@ -263,7 +268,6 @@ Wenn der Server-Admin Debug-Modus aktiviert hat (`service.sh` → 50):
 
 ### Ausstehend
 
-* User-ID-Hashing in Datenbank
 * Rate-Limiting
 * CORS-Policy
 * Helmet Security Headers
@@ -299,4 +303,5 @@ Wenn der Server-Admin Debug-Modus aktiviert hat (`service.sh` → 50):
 ✔ Security-Hardening: Debug-Login gated, OAuth poll stripped, Admin-Token runtime-only  
 ✔ TLS via Traefik Reverse Proxy (Let's Encrypt, HTTP→HTTPS Redirect)  
 ✔ DSGVO-HTTPS-Enforcement (Klartext-Traffic wird bei DSGVO-Modus abgelehnt)  
-➡️ Nächster Fokus: **User-ID-Hashing** + verbleibende Security-Härtung
+✔ User-ID-Hashing (HMAC-SHA256, DB enthält nur Hashes, automatische Migration)  
+➡️ Nächster Fokus: **Rate-Limiting** + verbleibende Security-Härtung

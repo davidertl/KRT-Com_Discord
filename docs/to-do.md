@@ -2,6 +2,7 @@ High priority:
 -add encryption to all out and inbound communication (websocket, audio)
   > (✔) Implemented: Traefik reverse proxy with Let's Encrypt TLS. HTTP→HTTPS redirect. DSGVO-HTTPS-Enforcement middleware rejects plaintext traffic when DSGVO compliance mode is active. install.sh step [7/12] installs Traefik, [11/12] configures TLS + domain. service.sh menu items 60-63 for Traefik management.
 -please also don't handle userid and clanid unhashed. 
+  > (✔) FIXED: All discord_user_id values are hashed via HMAC-SHA256 (using TOKEN_SECRET) before database storage. Raw Discord snowflake IDs are never persisted. Hash function: hashUserId() in src/crypto.js. All modules updated: discord.js (bot events), http.js (auth + data endpoints), voice.js (WebSocket auth), dsgvo.js (ban/policy functions). Admin endpoints accept raw IDs and hash before lookup. banned_users table stores raw_discord_id for admin display. Automatic migration on startup converts existing raw IDs to hashes.
 
 (✔) Token-based authentication & consent flow
   > Fix: Added src/crypto.js (HMAC-SHA256 signToken/verifyToken, 24h expiry). POST /auth/login validates user via Discord bot, returns signed token. Voice WS auth now requires authToken. New DB tables: banned_users, auth_tokens, policy_acceptance. Companion App: Verify button fetches GET /server-status + GET /privacy-policy. Privacy policy displayed with Accept button. Login gated behind policy acceptance. Token persisted for auto-reconnect.

@@ -21,7 +21,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private HotkeyHook? _hook;
     private BackendClient? _backend;
     private AudioCaptureService? _audio;
-    private MumbleService? _mumble;
+    private VoiceService? _voice;
     private BeepService? _beepService;
     private CancellationTokenSource? _streamCts;
     private RadioPanelViewModel? _activeRadio;
@@ -80,50 +80,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _sampleRate = value; OnPropertyChanged(); }
     }
 
-    // Mumble settings
-    private string _mumbleHost = "127.0.0.1";
-    public string MumbleHost
+    // Voice server settings
+    private string _voiceHost = "127.0.0.1";
+    public string VoiceHost
     {
-        get => _mumbleHost;
-        set { _mumbleHost = value; OnPropertyChanged(); }
+        get => _voiceHost;
+        set { _voiceHost = value; OnPropertyChanged(); }
     }
 
-    private int _mumblePort = 64738;
-    public int MumblePort
+    private int _voicePort = 3000;
+    public int VoicePort
     {
-        get => _mumblePort;
-        set { _mumblePort = value; OnPropertyChanged(); }
+        get => _voicePort;
+        set { _voicePort = value; OnPropertyChanged(); }
     }
 
-    private string _mumbleUsername = "";
-    public string MumbleUsername
+    private bool _isVoiceConnected;
+    public bool IsVoiceConnected
     {
-        get => _mumbleUsername;
-        set { _mumbleUsername = value; OnPropertyChanged(); }
-    }
-
-    private string _mumblePassword = "";
-    public string MumblePassword
-    {
-        get => _mumblePassword;
-        set { _mumblePassword = value; OnPropertyChanged(); }
-    }
-
-    private bool _isMumbleConnected;
-    public bool IsMumbleConnected
-    {
-        get => _isMumbleConnected;
+        get => _isVoiceConnected;
         set 
         { 
-            _isMumbleConnected = value; 
+            _isVoiceConnected = value; 
             OnPropertyChanged(); 
-            OnPropertyChanged(nameof(MumbleConnectionIndicator)); 
-            OnPropertyChanged(nameof(MumbleConnectButtonText));
+            OnPropertyChanged(nameof(VoiceConnectionIndicator)); 
+            OnPropertyChanged(nameof(VoiceConnectButtonText));
         }
     }
 
-    public string MumbleConnectionIndicator => IsMumbleConnected ? "Connected" : "Disconnected";
-    public string MumbleConnectButtonText => IsMumbleConnected ? "Disconnect" : "Connect";
+    public string VoiceConnectionIndicator => IsVoiceConnected ? "Connected" : "Disconnected";
+    public string VoiceConnectButtonText => IsVoiceConnected ? "Disconnect" : "Connect";
 
     #endregion
 
@@ -274,7 +260,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(); 
             MarkGlobalChanged();
             _beepService?.SetOutputDevice(value);
-            _mumble?.SetOutputDevice(value);
+            _voice?.SetOutputDevice(value);
         }
     }
 
@@ -413,7 +399,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             try
             {
-                await ConnectMumbleAsync();
+                await ConnectVoiceAsync();
             }
             catch
             {
@@ -518,15 +504,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             StatusText = $"Broadcasting to {broadcastRadios.Count} radios";
 
-            // Connect to Mumble if needed
-            if (_mumble == null || !_mumble.IsConnected)
+            // Connect to voice server if needed
+            if (_voice == null || !_voice.IsConnected)
             {
-                await ConnectMumbleAsync();
+                await ConnectVoiceAsync();
             }
 
-            if (_mumble == null || !_mumble.IsConnected)
+            if (_voice == null || !_voice.IsConnected)
             {
-                StatusText = "Mumble not connected - broadcast failed";
+                StatusText = "Voice not connected - broadcast failed";
                 foreach (var radio in broadcastRadios)
                 {
                     radio.SetBroadcasting(false);
@@ -538,8 +524,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             // Start transmitting to first radio's frequency (broadcasts will go to all)
             var firstRadio = broadcastRadios.First();
-            await _mumble.JoinFrequencyAsync(firstRadio.FreqId);
-            _mumble.StartTransmit();
+            await _voice.JoinFrequencyAsync(firstRadio.FreqId);
+            _voice.StartTransmit();
 
             // Start audio capture
             _audio?.Dispose();
@@ -582,7 +568,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _audio?.Dispose();
         _audio = null;
 
-        _mumble?.StopTransmit();
+        _voice?.StopTransmit();
 
         IsBroadcasting = false;
         IsStreaming = false;
@@ -684,10 +670,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         GuildId = config.GuildId;
         SampleRate = config.SampleRate;
 
-        MumbleHost = config.MumbleHost;
-        MumblePort = config.MumblePort;
-        MumbleUsername = config.MumbleUsername;
-        MumblePassword = config.MumblePassword;
+        VoiceHost = config.VoiceHost;
+        VoicePort = config.VoicePort;
 
         AutoConnect = config.AutoConnect;
         DeactivateRadiosOnAutoConnect = config.DeactivateRadiosOnAutoConnect;
@@ -787,10 +771,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.GuildId = GuildId;
         _config.SampleRate = SampleRate;
 
-        _config.MumbleHost = MumbleHost;
-        _config.MumblePort = MumblePort;
-        _config.MumbleUsername = MumbleUsername;
-        _config.MumblePassword = MumblePassword;
+        _config.VoiceHost = VoiceHost;
+        _config.VoicePort = VoicePort;
 
         _config.AutoConnect = AutoConnect;
         _config.DeactivateRadiosOnAutoConnect = DeactivateRadiosOnAutoConnect;
@@ -972,28 +954,28 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _streamCts?.Dispose();
             _streamCts = new CancellationTokenSource();
 
-            // Use Mumble for audio transmission
-            if (_mumble == null || !_mumble.IsConnected)
+            // Use VoiceService for audio transmission
+            if (_voice == null || !_voice.IsConnected)
             {
-                await ConnectMumbleAsync();
+                await ConnectVoiceAsync();
             }
 
-            if (_mumble != null && _mumble.IsConnected)
+            if (_voice != null && _voice.IsConnected)
             {
                 // Join the frequency channel — abort if join fails
-                bool joined = await _mumble.JoinFrequencyAsync(radio.FreqId);
+                bool joined = await _voice.JoinFrequencyAsync(radio.FreqId);
                 if (!joined)
                 {
                     StatusText = $"Cannot transmit: channel {radio.FreqId} unavailable";
                     radio.SetTransmitting(false);
                     return;
                 }
-                _mumble.StartTransmit();
+                _voice.StartTransmit();
                 _audio.Start();
             }
             else
             {
-                StatusText = "Mumble not connected";
+                StatusText = "Voice not connected";
                 radio.SetTransmitting(false);
                 return;
             }
@@ -1052,8 +1034,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _audio?.Dispose();
         _audio = null;
 
-        _mumble?.StopTransmit();
-        // Keep Mumble connection alive for next PTT
+        _voice?.StopTransmit();
+        // Keep voice connection alive for next PTT
 
         _streamCts?.Dispose();
         _streamCts = null;
@@ -1074,10 +1056,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         try
         {
-            if (_mumble != null)
+            if (_voice != null)
             {
                 var format = _audio?.WaveFormat;
-                _mumble.SendAudio(data, format?.SampleRate ?? SampleRate, format?.Channels ?? 1);
+                _voice.SendAudio(data, format?.SampleRate ?? SampleRate, format?.Channels ?? 1);
             }
         }
         catch
@@ -1086,39 +1068,27 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public async Task ConnectMumbleAsync()
+    public async Task ConnectVoiceAsync()
     {
-        if (_mumble != null)
+        if (_voice != null)
         {
-            await _mumble.DisconnectAsync();
-            _mumble.Dispose();
+            await _voice.DisconnectAsync();
+            _voice.Dispose();
         }
 
-        _mumble = new MumbleService();
-        _mumble.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
-        _mumble.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Mumble error: {ex.Message}");
-        _mumble.AudioReceived += OnMumbleAudioReceived;
+        _voice = new VoiceService();
+        _voice.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
+        _voice.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Voice error: {ex.Message}");
+        _voice.AudioReceived += OnVoiceAudioReceived;
         
         // Set output device
-        _mumble.SetOutputDevice(SelectedAudioOutputDevice);
+        _voice.SetOutputDevice(SelectedAudioOutputDevice);
 
-        // Mumble auth: discord_user_id as username, guild_id as password
-        // If a manual MumbleUsername is set, use it instead (for debugging / SuperUser)
-        var username = !string.IsNullOrWhiteSpace(MumbleUsername)
-            ? MumbleUsername
-            : !string.IsNullOrWhiteSpace(DiscordUserId)
-                ? DiscordUserId
-                : $"Companion_{Environment.MachineName}";
-
-        var password = !string.IsNullOrWhiteSpace(MumblePassword)
-            ? MumblePassword
-            : GuildId ?? "";
-
-        await _mumble.ConnectAsync(MumbleHost, MumblePort, username, password);
-        IsMumbleConnected = _mumble.IsConnected;
+        await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId);
+        IsVoiceConnected = _voice.IsConnected;
     }
     
-    private void OnMumbleAudioReceived(uint sessionId, string username)
+    private void OnVoiceAudioReceived(string discordUserId, string username)
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
@@ -1149,15 +1119,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
-    public async Task DisconnectMumbleAsync()
+    public async Task DisconnectVoiceAsync()
     {
-        if (_mumble != null)
+        if (_voice != null)
         {
-            await _mumble.DisconnectAsync();
-            _mumble.Dispose();
-            _mumble = null;
+            await _voice.DisconnectAsync();
+            _voice.Dispose();
+            _voice = null;
         }
-        IsMumbleConnected = false;
+        IsVoiceConnected = false;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -1170,7 +1140,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _hook?.Dispose();
         _backend?.Dispose();
         _audio?.Dispose();
-        _mumble?.Dispose();
+        _voice?.Dispose();
         _streamCts?.Dispose();
     }
 }

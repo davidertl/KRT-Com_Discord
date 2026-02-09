@@ -12,11 +12,9 @@ public class CompanionConfig
 
     public string GuildId { get; set; } = "";
 
-    // Mumble server settings
-    public string MumbleHost { get; set; } = "127.0.0.1";
-    public int MumblePort { get; set; } = 64738;
-    public string MumbleUsername { get; set; } = "";
-    public string MumblePassword { get; set; } = "";
+    // Voice relay server settings (WS port derived from ServerBaseUrl)
+    public string VoiceHost { get; set; } = "127.0.0.1";
+    public int VoicePort { get; set; } = 3000;
 
     // App settings
     public bool AutoConnect { get; set; } = true;

@@ -170,14 +170,14 @@
               <Style TargetType="Ellipse">
                 <Setter Property="Fill" Value="{StaticResource AccentRed}"/>
                 <Style.Triggers>
-                  <DataTrigger Binding="{Binding IsMumbleConnected}" Value="True">
+                  <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                     <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
                   </DataTrigger>
                 </Style.Triggers>
               </Style>
             </Ellipse.Style>
           </Ellipse>
-          <TextBlock Text="{Binding MumbleConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
+          <TextBlock Text="{Binding VoiceConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
                      VerticalAlignment="Center" Margin="0,0,20,0"/>
           <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource TextSecondary}" 
                      VerticalAlignment="Center" MaxWidth="400" TextTrimming="CharacterEllipsis"/>
@@ -638,24 +638,24 @@
             <TextBlock Text="Server Connection" Foreground="{StaticResource TextPrimary}" 
                        FontSize="18" FontWeight="SemiBold" Margin="0,0,0,20"/>
 
-            <!-- Mumble Server with Discord Auth -->
+            <!-- Voice Server -->
             <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
               <StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
-                  <TextBlock Text="Mumble Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold"/>
+                  <TextBlock Text="Voice Server" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold"/>
                   <Ellipse Width="10" Height="10" Margin="15,0,6,0" VerticalAlignment="Center">
                     <Ellipse.Style>
                       <Style TargetType="Ellipse">
                         <Setter Property="Fill" Value="{StaticResource AccentRed}"/>
                         <Style.Triggers>
-                          <DataTrigger Binding="{Binding IsMumbleConnected}" Value="True">
+                          <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                             <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
                           </DataTrigger>
                         </Style.Triggers>
                       </Style>
                     </Ellipse.Style>
                   </Ellipse>
-                  <TextBlock Text="{Binding MumbleConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
+                  <TextBlock Text="{Binding VoiceConnectionIndicator}" Foreground="{StaticResource TextSecondary}" 
                              VerticalAlignment="Center"/>
                 </StackPanel>
                 
@@ -666,12 +666,12 @@
                   </Grid.ColumnDefinitions>
                   <StackPanel Grid.Column="0" Margin="0,0,10,0">
                     <TextBlock Text="Host" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding MumbleHost, UpdateSourceTrigger=PropertyChanged}" 
+                    <TextBox Text="{Binding VoiceHost, UpdateSourceTrigger=PropertyChanged}" 
                              Style="{StaticResource ModernTextBox}"/>
                   </StackPanel>
                   <StackPanel Grid.Column="1">
                     <TextBlock Text="Port" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                    <TextBox Text="{Binding MumblePort, UpdateSourceTrigger=PropertyChanged}" 
+                    <TextBox Text="{Binding VoicePort, UpdateSourceTrigger=PropertyChanged}" 
                              Style="{StaticResource ModernTextBox}"/>
                   </StackPanel>
                 </Grid>
@@ -695,8 +695,8 @@
                   </StackPanel>
                 </Border>
 
-                <Button Content="{Binding MumbleConnectButtonText}" Style="{StaticResource ModernButton}" 
-                        Click="MumbleConnect_Click" HorizontalAlignment="Left"/>
+                <Button Content="{Binding VoiceConnectButtonText}" Style="{StaticResource ModernButton}" 
+                        Click="VoiceConnect_Click" HorizontalAlignment="Left"/>
               </StackPanel>
             </Border>
 

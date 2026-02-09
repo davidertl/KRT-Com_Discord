@@ -39,23 +39,15 @@ public partial class MainWindow : Window
         await _vm.ReloadAsync();
     }
 
-    private async void MumbleConnect_Click(object sender, RoutedEventArgs e)
+    private async void VoiceConnect_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm.IsMumbleConnected)
+        if (_vm.IsVoiceConnected)
         {
-            await _vm.DisconnectMumbleAsync();
+            await _vm.DisconnectVoiceAsync();
         }
         else
         {
-            await _vm.ConnectMumbleAsync();
-        }
-    }
-
-    private void MumblePasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
-    {
-        if (sender is PasswordBox pb)
-        {
-            _vm.MumblePassword = pb.Password;
+            await _vm.ConnectVoiceAsync();
         }
     }
 

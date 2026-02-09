@@ -1,6 +1,6 @@
 # KRT-Com / das-krt – Funkkommunikation für Discord
 
-**Status:** Alpha 0.0.3  
+**Status:** Alpha 0.0.4  
 **Stand:** Backend + Companion App funktional, Security-Rework aktiv
 
 ---
@@ -15,7 +15,7 @@ User sollen **parallel** mit mehreren Gruppen kommunizieren können, ohne den Vo
 
 ## Kernfunktionen (aktuell)
 
-### ✔ Implementiert (Alpha 0.0.3)
+### ✔ Implementiert (Alpha 0.0.4)
 
 **Backend:**
 * Discord Bot (read-only, Discord API, `syncGuildMembers` on startup)
@@ -160,7 +160,7 @@ User sollen **parallel** mit mehreren Gruppen kommunizieren können, ohne den Vo
 
 ## Sicherheit
 
-### Implementiert (Alpha 0.0.3)
+### Implementiert (Alpha 0.0.4)
 
 * Token-basierte Auth (HMAC-SHA256, 24h Expiry)
 * Server-seitige User-Verifizierung via Discord Bot
@@ -182,7 +182,7 @@ User sollen **parallel** mit mehreren Gruppen kommunizieren können, ohne den Vo
 
 ## Aktueller Stand
 
-✔ Backend stabil (Alpha 0.0.3)  
+✔ Backend stabil (Alpha 0.0.4)  
 ✔ Companion App funktional (Multi-Radio, PTT, Audio, Auth)  
 ✔ Security-Rework Phase 1 abgeschlossen (Token-Auth, Ban, DSGVO, Consent)  
 ➡️ Nächster Fokus: **TLS-Verschlüsselung** + verbleibende Security-Härtung

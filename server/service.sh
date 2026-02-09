@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.3
+##version alpha-0.0.4
 ## Service management & tools for das-krt Backend
 ## Usage: bash service.sh [start|stop|restart|status|logs|menu]
 
@@ -22,7 +22,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.3"
+VERSION="Alpha 0.0.4"
 SERVICE_NAME="das-krt-backend"
 
 # --------------------------------------------------

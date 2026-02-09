@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.3
+##version alpha-0.0.4
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.3"
+VERSION="Alpha 0.0.4"
 echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
@@ -1829,7 +1829,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     res.json({
       ok: true,
       data: {
-        version: 'Alpha 0.0.3',
+        version: 'Alpha 0.0.4',
         dsgvoEnabled: status.dsgvoEnabled || false,
         debugMode: status.debugMode || false,
         retentionDays: status.retentionDays || 0,

@@ -1070,6 +1070,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task ConnectVoiceAsync()
     {
+        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort} userId={DiscordUserId} guildId={GuildId}");
+
         if (_voice != null)
         {
             await _voice.DisconnectAsync();
@@ -1077,8 +1079,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _voice = new VoiceService();
-        _voice.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
-        _voice.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Voice error: {ex.Message}");
+        _voice.StatusChanged += status =>
+        {
+            LogDebug($"[Voice] Status: {status}");
+            Application.Current.Dispatcher.Invoke(() => StatusText = status);
+        };
+        _voice.ErrorOccurred += ex =>
+        {
+            LogDebug($"[Voice] Error: {ex}");
+            Application.Current.Dispatcher.Invoke(() => StatusText = $"Voice error: {ex.Message}");
+        };
         _voice.AudioReceived += OnVoiceAudioReceived;
         
         // Set output device
@@ -1086,32 +1096,41 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId);
         IsVoiceConnected = _voice.IsConnected;
+
+        // Auto-join all enabled radio frequencies so we receive RX notifications and audio
+        if (IsVoiceConnected)
+        {
+            foreach (var panel in RadioPanels.Where(r => r.IsEnabled))
+            {
+                await _voice.JoinFrequencyAsync(panel.FreqId);
+                LogDebug($"[Voice] Auto-joined freq {panel.FreqId} ({panel.Label})");
+            }
+            if (EnableEmergencyRadio)
+            {
+                await _voice.JoinFrequencyAsync(EmergencyRadio.FreqId);
+                LogDebug($"[Voice] Auto-joined emergency freq {EmergencyRadio.FreqId}");
+            }
+        }
+
+        LogDebug($"[Voice] ConnectVoiceAsync done: IsConnected={IsVoiceConnected}");
     }
     
-    private void OnVoiceAudioReceived(string discordUserId, string username)
+    private void OnVoiceAudioReceived(string discordUserId, string username, int freqId)
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
-            // Add to recent transmissions for active radio (if connected to a channel)
             var timestamp = $"{DateTime.Now:HH:mm} - {username}";
             
-            // Find active radio panel based on current channel/frequency
-            if (_activeRadio != null && _activeRadio.IsEnabled && !_activeRadio.IsMuted)
+            // Find radio panel matching the frequency
+            var matchingRadio = RadioPanels.FirstOrDefault(r => r.IsEnabled && !r.IsMuted && r.FreqId == freqId);
+            if (matchingRadio == null && EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
             {
-                _activeRadio.AddTransmission(timestamp);
+                matchingRadio = EmergencyRadio;
             }
-            else
+            
+            if (matchingRadio != null)
             {
-                // Add to all enabled, non-muted radios that are listening
-                foreach (var radio in RadioPanels.Where(r => r.IsEnabled && !r.IsMuted))
-                {
-                    radio.AddTransmission(timestamp);
-                    break; // Just add to first active for now
-                }
-                if (EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted)
-                {
-                    EmergencyRadio.AddTransmission(timestamp);
-                }
+                matchingRadio.AddTransmission(timestamp);
             }
             
             // Play RX beep for incoming audio

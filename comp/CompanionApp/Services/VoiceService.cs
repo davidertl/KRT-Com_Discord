@@ -1,14 +1,14 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Concentus.Enums;
 using Concentus.Structs;
@@ -27,19 +27,19 @@ public sealed class VoiceService : IDisposable
     // ---- events ----
     public event Action<string>? StatusChanged;
     public event Action<Exception>? ErrorOccurred;
-    /// <summary>Raised when audio from another user is received. Args: (discordUserId, username)</summary>
-    public event Action<string, string>? AudioReceived;
+    /// <summary>Raised when audio from another user is received. Args: (discordUserId, username, freqId)</summary>
+    public event Action<string, string, int>? AudioReceived;
 
     // ---- connection state ----
     private ClientWebSocket? _ws;
-    private UdpClient? _udp;
     private CancellationTokenSource? _cts;
     private Task? _wsReceiveTask;
-    private Task? _udpReceiveTask;
     private Task? _heartbeatTask;
     private string _sessionToken = "";
-    private int _udpPort;
-    private IPEndPoint? _udpEndpoint;
+
+    // ---- audio send queue (binary WS frames) ----
+    private Channel<byte[]>? _audioSendChannel;
+    private Task? _audioSendTask;
 
     // ---- opus codec ----
     private OpusEncoder? _opusEncoder;
@@ -127,6 +127,7 @@ public sealed class VoiceService : IDisposable
             .TrimEnd('/');
 
         var wsUri = new Uri($"{scheme}://{cleanHost}:{wsPort}/voice");
+        Status($"Connecting to {wsUri} ...");
 
         try
         {
@@ -138,6 +139,8 @@ public sealed class VoiceService : IDisposable
             Status($"WebSocket connect failed: {ex.Message}");
             return;
         }
+
+        Status("WebSocket connected, sending auth...");
 
         // Send auth message
         var auth = new { type = "auth", discordUserId, guildId };
@@ -227,7 +230,7 @@ public sealed class VoiceService : IDisposable
     /// </summary>
     public void SendAudio(byte[] pcmData, int sampleRate, int channels)
     {
-        if (!_isTransmitting || _udp == null || _udpEndpoint == null) return;
+        if (!_isTransmitting || _ws == null || _ws.State != WebSocketState.Open) return;
 
         _lastCaptureRate = sampleRate;
         _lastCaptureChannels = channels;
@@ -264,20 +267,13 @@ public sealed class VoiceService : IDisposable
 
                 if (encodedLen <= 0) continue;
 
-                // Build UDP packet: [4 bytes freqId][4 bytes sequence][encoded opus data]
+                // Build audio packet: [4 bytes freqId BE][4 bytes sequence BE][encoded opus data]
                 var packet = new byte[8 + encodedLen];
-                BitConverter.GetBytes(_currentFreqId).CopyTo(packet, 0);
-                BitConverter.GetBytes(_txSequence++).CopyTo(packet, 4);
+                BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(0), _currentFreqId);
+                BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4), _txSequence++);
                 Array.Copy(encoded, 0, packet, 8, encodedLen);
 
-                try
-                {
-                    _udp.Send(packet, packet.Length, _udpEndpoint);
-                }
-                catch
-                {
-                    // Ignore send errors
-                }
+                _audioSendChannel?.Writer.TryWrite(packet);
             }
         }
     }
@@ -347,10 +343,18 @@ public sealed class VoiceService : IDisposable
                 msgBuffer.Write(buffer, 0, result.Count);
                 if (!result.EndOfMessage) continue;
 
-                var json = Encoding.UTF8.GetString(msgBuffer.ToArray());
+                var data = msgBuffer.ToArray();
+                var len = (int)msgBuffer.Length;
                 msgBuffer.SetLength(0);
 
-                HandleWsMessage(json);
+                if (result.MessageType == WebSocketMessageType.Binary)
+                {
+                    HandleAudioFrame(data, len);
+                }
+                else
+                {
+                    HandleWsMessage(Encoding.UTF8.GetString(data, 0, len));
+                }
             }
         }
         catch (Exception ex)
@@ -380,12 +384,13 @@ public sealed class VoiceService : IDisposable
             {
                 case "auth_ok":
                     _sessionToken = root.TryGetProperty("sessionToken", out var st) ? st.GetString() ?? "" : "";
-                    _udpPort = root.TryGetProperty("udpPort", out var up) ? up.GetInt32() : 0;
 
-                    if (_udpPort > 0)
+                    // Set up audio send channel for binary WS frames
+                    _audioSendChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(200)
                     {
-                        InitUdp();
-                    }
+                        FullMode = BoundedChannelFullMode.DropOldest
+                    });
+                    _audioSendTask = Task.Run(() => AudioSendLoopAsync(_cts!.Token));
 
                     InitPlayback();
 
@@ -396,6 +401,7 @@ public sealed class VoiceService : IDisposable
                     _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts!.Token));
                     break;
 
+                case "auth_error":
                 case "auth_fail":
                     var reason = root.TryGetProperty("reason", out var rp) ? rp.GetString() : "unknown";
                     Status($"Auth failed: {reason}");
@@ -405,13 +411,14 @@ public sealed class VoiceService : IDisposable
                 case "rx":
                     // Someone is transmitting on a freq we're listening to
                     // { type: "rx", freqId, discordUserId, username, action: "start"|"stop" }
+                    var rxFreqId = root.TryGetProperty("freqId", out var rf) ? rf.GetInt32() : 0;
                     var rxUser = root.TryGetProperty("discordUserId", out var du) ? du.GetString() ?? "" : "";
                     var rxName = root.TryGetProperty("username", out var un) ? un.GetString() ?? rxUser : rxUser;
                     var rxAction = root.TryGetProperty("action", out var ra) ? ra.GetString() : "";
 
                     if (rxAction == "start")
                     {
-                        AudioReceived?.Invoke(rxUser, rxName);
+                        AudioReceived?.Invoke(rxUser, rxName, rxFreqId);
                     }
                     break;
 
@@ -421,103 +428,66 @@ public sealed class VoiceService : IDisposable
                     break;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore malformed messages
+            Status($"WS parse error: {ex.Message}");
         }
     }
 
     // ----------------------------------------------------------------
-    // UDP
+    // Audio send/receive (binary WebSocket frames)
     // ----------------------------------------------------------------
 
-    private void InitUdp()
+    /// <summary>
+    /// Background loop that drains the audio send channel and sends binary WS frames.
+    /// </summary>
+    private async Task AudioSendLoopAsync(CancellationToken ct)
     {
-        _udp?.Dispose();
-
-        // Resolve host for UDP endpoint
-        var addresses = Dns.GetHostAddresses(_host
-            .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
-            .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
-            .TrimEnd('/'));
-        
-        var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) 
-                 ?? addresses.First();
-
-        _udpEndpoint = new IPEndPoint(ip, _udpPort);
-
-        _udp = new UdpClient(0); // Bind to any local port
-
-        // Send a handshake packet so the server knows our UDP endpoint
-        // [4 bytes: 0 = handshake magic][session token UTF-8]
-        var tokenBytes = Encoding.UTF8.GetBytes(_sessionToken);
-        var handshake = new byte[4 + tokenBytes.Length];
-        // freqId = 0 signals handshake
-        Array.Copy(tokenBytes, 0, handshake, 4, tokenBytes.Length);
-        _udp.Send(handshake, handshake.Length, _udpEndpoint);
-
-        // Start UDP receive loop
-        _udpReceiveTask = Task.Run(() => UdpReceiveLoopAsync(_cts!.Token));
-    }
-
-    private async Task UdpReceiveLoopAsync(CancellationToken ct)
-    {
-        if (_udp == null) return;
-
-        _opusDecoder ??= new OpusDecoder(OpusSampleRate, OpusChannels);
+        if (_audioSendChannel == null || _ws == null) return;
 
         try
         {
-            while (!ct.IsCancellationRequested)
+            await foreach (var packet in _audioSendChannel.Reader.ReadAllAsync(ct))
             {
-                UdpReceiveResult result;
-                try
-                {
-                    result = await _udp.ReceiveAsync(ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (SocketException)
-                {
-                    break;
-                }
-
-                var data = result.Buffer;
-                if (data.Length < 9) continue; // minimum: 4 freqId + 4 seq + 1 opus byte
-
-                // Parse packet: [4 bytes freqId][4 bytes sequence][opus data]
-                var freqId = BitConverter.ToInt32(data, 0);
-                var seq = BitConverter.ToUInt32(data, 4);
-                var opusLen = data.Length - 8;
-                var opusData = new byte[opusLen];
-                Array.Copy(data, 8, opusData, 0, opusLen);
-
-                if (_isMuted) continue;
-
-                // Decode Opus to PCM
-                try
-                {
-                    var pcm = new short[OpusFrameSamples];
-                    var decoded = _opusDecoder.Decode(opusData, 0, opusLen, pcm, 0, OpusFrameSamples, false);
-                    if (decoded > 0)
-                    {
-                        PlayPcm(pcm, decoded);
-                    }
-                }
-                catch
-                {
-                    // Ignore decode errors
-                }
+                if (_ws.State != WebSocketState.Open) break;
+                await _ws.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, ct);
             }
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) { }
+        catch { }
+    }
+
+    /// <summary>
+    /// Handle an incoming binary WS frame containing an audio packet.
+    /// Format: [4 bytes freqId BE][4 bytes sequence BE][opus data]
+    /// </summary>
+    private void HandleAudioFrame(byte[] data, int length)
+    {
+        if (length < 9) return;
+        if (_isMuted) return;
+
+        // Parse big-endian header
+        int freqId = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(0));
+        // uint seq = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4)); // available if needed
+
+        int opusLen = length - 8;
+        var opusData = new byte[opusLen];
+        Array.Copy(data, 8, opusData, 0, opusLen);
+
+        // Decode Opus to PCM
+        try
         {
-            if (!ct.IsCancellationRequested)
+            _opusDecoder ??= new OpusDecoder(OpusSampleRate, OpusChannels);
+            var pcm = new short[OpusFrameSamples];
+            var decoded = _opusDecoder.Decode(opusData, 0, opusLen, pcm, 0, OpusFrameSamples, false);
+            if (decoded > 0)
             {
-                Error(ex);
+                PlayPcm(pcm, decoded);
             }
+        }
+        catch
+        {
+            // Ignore decode errors
         }
     }
 
@@ -693,9 +663,8 @@ public sealed class VoiceService : IDisposable
             _waveProvider = null;
         }
 
-        _udp?.Dispose();
-        _udp = null;
-        _udpEndpoint = null;
+        _audioSendChannel?.Writer.TryComplete();
+        _audioSendChannel = null;
 
         _ws?.Dispose();
         _ws = null;

@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.2"
+VERSION="Alpha 0.0.3"
 echo -e "${GREEN}=== das-krt Bootstrap | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
@@ -231,7 +231,6 @@ function mustEnv(name) {
 (async () => {
   const bindHost = process.env.BIND_HOST || '127.0.0.1';
   const bindPort = Number(process.env.BIND_PORT || '3000');
-  const voiceUdpPort = Number(process.env.VOICE_UDP_PORT || '5060');
 
   const dbPath = mustEnv('DB_PATH');
   const mapPath = mustEnv('CHANNEL_MAP_PATH');
@@ -254,23 +253,36 @@ function mustEnv(name) {
       : [],
   });
 
-  const wsHub = createWsHub(httpServer, { stateStore });
+  const wsHub = createWsHub({ stateStore });
 
-  // Voice relay (WebSocket control + UDP audio)
+  // Voice relay (WebSocket control + binary WS audio)
   const voiceRelay = createVoiceRelay({
-    httpServer,
     db,
     usersStore,
-    udpPort: voiceUdpPort,
     allowedGuildIds: process.env.DISCORD_GUILD_ID
-      ? process.env.DISCORD_GUILD_ID.split(',')
+      ? process.env.DISCORD_GUILD_ID.split(',') 
       : [],
   });
   voiceRelay.start();
 
+  // Route WebSocket upgrades by path
+  httpServer.on('upgrade', (req, socket, head) => {
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/voice') {
+      voiceRelay.handleUpgrade(req, socket, head);
+    } else if (pathname === '/ws') {
+      wsHub.handleUpgrade(req, socket, head);
+    } else {
+      socket.destroy();
+    }
+  });
+
   // Wire TX broadcast (keine circular deps)
   if (typeof httpServer._setOnTxEvent === 'function') {
-    httpServer._setOnTxEvent((payload) => wsHub.broadcast({ type: 'tx_event', payload }));
+    httpServer._setOnTxEvent((payload) => {
+      wsHub.broadcast({ type: 'tx_event', payload });
+      voiceRelay.notifyTxEvent(payload);
+    });
   }
 
   // Discord voice_state broadcast bleibt wie gehabt
@@ -285,7 +297,6 @@ function mustEnv(name) {
 
   httpServer.listen(bindPort, bindHost, async () => {
     console.log(`[http] listening on http://${bindHost}:${bindPort}`);
-    console.log(`[voice] UDP relay on port ${voiceUdpPort}`);
     console.log(`[map] loaded ${mapping.size()} channel mappings from ${mapPath}`);
     await bot.start();
   });
@@ -455,44 +466,42 @@ module.exports = { createUsersStore };
 EOF
 )"
 
-# src/voice.js - Voice relay (WebSocket control + UDP audio)
+# src/voice.js - Voice relay (WebSocket control + binary WS audio)
 write_file_backup "$SRC_DIR/voice.js" "$(cat <<'EOF'
 'use strict';
 
-const dgram = require('dgram');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
-const url = require('url');
 
 /**
  * Voice Relay
  * - Companion clients connect via WebSocket to /voice for control signaling
  *   (auth, join/leave frequency, heartbeat)
- * - Opus audio is exchanged via UDP
+ * - Opus audio is exchanged as binary WebSocket frames
  * - Packet format: [4 bytes freqId BE][4 bytes sequence BE][opus data]
- * - UDP handshake: freqId=0 + session token as payload
  */
-function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedGuildIds = [] }) {
+function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
   // Session management
-  const sessions = new Map();       // sessionToken -> { discordUserId, guildId, displayName, ws, udpAddr, udpPort, frequencies: Set, lastSeen }
-  const udpClients = new Map();     // 'ip:port' -> sessionToken
+  const sessions = new Map();       // sessionToken -> { discordUserId, guildId, displayName, ws, frequencies: Set, lastSeen }
 
   // Frequency subscriptions: freqId -> Set<sessionToken>
   const freqSubscribers = new Map();
 
-  const udpSocket = dgram.createSocket('udp4');
-
-  // --- WebSocket control plane ---
-  let wss = null;
+  const wss = new WebSocketServer({ noServer: true });
 
   function start() {
-    // Create WS server on /voice path, sharing the HTTP server
-    wss = new WebSocketServer({ server: httpServer, path: '/voice' });
 
     wss.on('connection', (ws, req) => {
       let sessionToken = null;
 
-      ws.on('message', (raw) => {
+      ws.on('message', (raw, isBinary) => {
+        // Binary = audio frame
+        if (isBinary) {
+          if (sessionToken) handleAudio(sessionToken, raw);
+          return;
+        }
+
+        // Text = control message
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
 
@@ -525,59 +534,6 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
       });
     });
 
-    // --- UDP audio plane ---
-    udpSocket.on('message', (buf, rinfo) => {
-      if (buf.length < 8) return;
-
-      const freqId = buf.readUInt32BE(0);
-      const key = rinfo.address + ':' + rinfo.port;
-
-      // Handshake: freqId=0, payload = session token
-      if (freqId === 0) {
-        const token = buf.slice(8).toString('utf-8').trim();
-        const session = sessions.get(token);
-        if (session) {
-          session.udpAddr = rinfo.address;
-          session.udpPort = rinfo.port;
-          udpClients.set(key, token);
-          // Send ack
-          const ack = Buffer.alloc(8);
-          ack.writeUInt32BE(0, 0);
-          ack.writeUInt32BE(1, 4);
-          udpSocket.send(ack, rinfo.port, rinfo.address);
-          console.log('[voice] UDP handshake OK for', session.discordUserId);
-        }
-        return;
-      }
-
-      // Audio packet: forward to all subscribers of this frequency except sender
-      const senderToken = udpClients.get(key);
-      if (!senderToken) return;
-
-      const senderSession = sessions.get(senderToken);
-      if (!senderSession) return;
-
-      // Verify sender is subscribed to this frequency
-      if (!senderSession.frequencies.has(freqId)) return;
-
-      const subscribers = freqSubscribers.get(freqId);
-      if (!subscribers) return;
-
-      // Notify WS listeners about RX start (first packet detection could be added)
-      // Forward audio to all other subscribers
-      for (const subToken of subscribers) {
-        if (subToken === senderToken) continue;
-        const sub = sessions.get(subToken);
-        if (sub && sub.udpAddr && sub.udpPort) {
-          udpSocket.send(buf, sub.udpPort, sub.udpAddr);
-        }
-      }
-    });
-
-    udpSocket.bind(udpPort, '0.0.0.0', () => {
-      console.log('[voice] UDP relay listening on port', udpPort);
-    });
-
     // Periodic cleanup of stale sessions (no heartbeat for > 60s)
     setInterval(() => {
       const cutoff = Date.now() - 60000;
@@ -591,6 +547,31 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
         }
       }
     }, 30000);
+  }
+
+  // --- Audio handling (binary WS frames) ---
+  function handleAudio(senderToken, buf) {
+    if (buf.length < 9) return; // min: 4 freqId + 4 seq + 1 byte opus
+
+    const freqId = buf.readUInt32BE(0);
+
+    const senderSession = sessions.get(senderToken);
+    if (!senderSession) return;
+
+    // Verify sender is subscribed to this frequency
+    if (!senderSession.frequencies.has(freqId)) return;
+
+    const subscribers = freqSubscribers.get(freqId);
+    if (!subscribers) return;
+
+    // Forward audio to all other subscribers as binary WS frame
+    for (const subToken of subscribers) {
+      if (subToken === senderToken) continue;
+      const sub = sessions.get(subToken);
+      if (sub && sub.ws && sub.ws.readyState === 1) {
+        sub.ws.send(buf);
+      }
+    }
   }
 
   function handleAuth(ws, msg, setToken) {
@@ -622,8 +603,6 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
       guildId: String(guildId),
       displayName: user.display_name || String(discordUserId),
       ws,
-      udpAddr: null,
-      udpPort: null,
       frequencies: new Set(),
       lastSeen: now,
     };
@@ -640,7 +619,6 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
     ws.send(JSON.stringify({
       type: 'auth_ok',
       sessionToken,
-      udpPort,
       displayName: session.displayName,
     }));
   }
@@ -702,11 +680,6 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
       }
     }
 
-    // Remove UDP mapping
-    if (session.udpAddr && session.udpPort) {
-      udpClients.delete(session.udpAddr + ':' + session.udpPort);
-    }
-
     // Remove DB session
     db.prepare('DELETE FROM voice_sessions WHERE session_token = ?').run(token);
 
@@ -714,7 +687,53 @@ function createVoiceRelay({ httpServer, db, usersStore, udpPort = 5060, allowedG
     console.log('[voice] Session cleaned up:', session.discordUserId);
   }
 
-  return { start };
+  /**
+   * Notify voice relay subscribers about a TX event (from REST API).
+   * Sends an 'rx' message to all subscribers on the frequency except the transmitter.
+   */
+  function notifyTxEvent(payload) {
+    const freqId = Number(payload.freqId);
+    const discordUserId = String(payload.discordUserId || '');
+    const action = payload.action;
+
+    const subs = freqSubscribers.get(freqId);
+    if (!subs || subs.size === 0) return;
+
+    // Look up sender's display name from their session
+    let username = discordUserId;
+    for (const [, session] of sessions) {
+      if (session.discordUserId === discordUserId) {
+        username = session.displayName || username;
+        break;
+      }
+    }
+
+    const msg = JSON.stringify({
+      type: 'rx',
+      freqId,
+      discordUserId,
+      username,
+      action,
+    });
+
+    for (const subToken of subs) {
+      const sub = sessions.get(subToken);
+      if (!sub || !sub.ws || sub.ws.readyState !== 1) continue;
+      if (sub.discordUserId === discordUserId) continue; // don't echo to sender
+      sub.ws.send(msg);
+    }
+  }
+
+  return {
+    start,
+    wss,
+    notifyTxEvent,
+    handleUpgrade: (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    },
+  };
 }
 
 module.exports = { createVoiceRelay };
@@ -963,8 +982,8 @@ write_file_backup "$SRC_DIR/ws.js" "$(cat <<'EOF'
 
 const WebSocket = require('ws');
 
-function createWsHub(httpServer, { stateStore }) {
-  const wss = new WebSocket.Server({ server: httpServer });
+function createWsHub({ stateStore }) {
+  const wss = new WebSocket.Server({ noServer: true });
 
   function send(ws, obj) {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -985,6 +1004,12 @@ function createWsHub(httpServer, { stateStore }) {
   });
 
   return {
+    wss,
+    handleUpgrade: (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    },
     broadcast: (obj) => {
       const msg = JSON.stringify(obj);
       for (const ws of wss.clients) {
@@ -1173,9 +1198,6 @@ DB_PATH=$BACKEND_DIR/state.sqlite
 CHANNEL_MAP_PATH=$CHANNEL_MAP
 
 ADMIN_TOKEN=$ADMIN_TOKEN
-
-# Voice relay UDP port (for Companion App audio)
-VOICE_UDP_PORT=5060
 EOF
 
   chown "$ADMIN_USER:$ADMIN_USER" "$ENV_FILE" || true

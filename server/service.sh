@@ -26,6 +26,20 @@ VERSION="Alpha 0.0.4"
 SERVICE_NAME="das-krt-backend"
 
 # --------------------------------------------------
+# JSON Escape Helper (prevents injection via user input)
+# --------------------------------------------------
+json_escape() {
+  local str="$1"
+  # Escape backslashes, double quotes, and control characters
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  printf '%s' "$str"
+}
+
+# --------------------------------------------------
 # Variablen
 # --------------------------------------------------
 APP_ROOT="/opt/das-krt"
@@ -244,7 +258,7 @@ do_dsgvo_delete_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-user" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -279,7 +293,7 @@ do_dsgvo_delete_guild() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-guild" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"guildId\":\"${GUILD_ID}\"}" 2>/dev/null || true)"
+    -d "{\"guildId\":\"$(json_escape "$GUILD_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -393,6 +407,12 @@ do_channel_sync_interval() {
   read -r -p "$(echo -e "${CYAN}Neues Sync-Intervall in Stunden (min 1) [24]: ${NC}")" HOURS
   HOURS="${HOURS:-24}"
 
+  # Validate numeric input
+  if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -lt 1 ]; then
+    log_error "Ung\u00fcltige Eingabe: '$HOURS' (muss eine Zahl >= 1 sein)"
+    return
+  fi
+
   local RESPONSE
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/interval" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
@@ -429,7 +449,7 @@ do_ban_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/ban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\",\"reason\":\"${BAN_REASON}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\",\"reason\":\"$(json_escape "$BAN_REASON")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     log_ok "User $USER_ID gebannt"
@@ -456,7 +476,7 @@ do_unban_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/unban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     log_ok "User $USER_ID entbannt"
@@ -509,7 +529,7 @@ do_delete_and_ban() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-and-ban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -931,6 +951,144 @@ do_toggle_debug_login() {
 }
 
 # --------------------------------------------------
+# Logging Management
+# --------------------------------------------------
+do_logging_status() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  log_info "Log-Level Status:"
+  local HTTP_CODE BODY FULL_RESP
+  FULL_RESP="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  HTTP_CODE="$(echo "$FULL_RESP" | tail -1)"
+  BODY="$(echo "$FULL_RESP" | head -n -1)"
+  if [ -z "$BODY" ]; then
+    log_error "Backend nicht erreichbar"
+    return
+  fi
+
+  if [ "$HTTP_CODE" != "200" ]; then
+    log_error "Backend hat HTTP $HTTP_CODE zurückgegeben — Logging-Endpunkt nicht verfügbar"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  # Verify it's actually JSON
+  if ! echo "$BODY" | grep -q '"global"'; then
+    log_error "Ungültige Antwort vom Backend (kein JSON)"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  echo ""
+  # Pretty-print each service level
+  local GLOBAL_LVL
+  GLOBAL_LVL="$(echo "$BODY" | grep -o '"global":"[^"]*"' | cut -d'"' -f4)"
+  log_info "Globales Level: ${GLOBAL_LVL:-?}"
+  echo ""
+
+  for SVC in voice http discord dsgvo ws oauth; do
+    local LVL
+    LVL="$(echo "$BODY" | grep -o "\"${SVC}\":\"[^\"]*\"" | cut -d'"' -f4)"
+    if echo "$LVL" | grep -q '(override)'; then
+      log_warn "  $SVC: $LVL"
+    else
+      log_ok "  $SVC: ${LVL:-$GLOBAL_LVL}"
+    fi
+  done
+  echo ""
+  log_info "Verfügbare Levels: minimalLOG | debugLOG | attackLOG"
+  echo ""
+}
+
+do_logging_set() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  # Pre-check if endpoint exists
+  local CHECK_CODE
+  CHECK_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || echo 0)"
+  if [ "$CHECK_CODE" != "200" ]; then
+    log_error "Logging-Endpunkt nicht verfügbar (HTTP $CHECK_CODE)"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  echo ""
+  log_info "Verfügbare Services:"
+  echo -e "  ${CYAN}all${NC}      — Alle Services (globales Level)"
+  echo -e "  ${CYAN}voice${NC}    — Voice Relay"
+  echo -e "  ${CYAN}http${NC}     — HTTP Server & OAuth"
+  echo -e "  ${CYAN}discord${NC}  — Discord Bot"
+  echo -e "  ${CYAN}dsgvo${NC}    — DSGVO Compliance"
+  echo -e "  ${CYAN}ws${NC}       — WebSocket Hub"
+  echo -e "  ${CYAN}oauth${NC}    — OAuth2 Login"
+  echo ""
+  echo -e "  Verfügbare Levels: ${GREEN}minimalLOG${NC} | ${GREEN}debugLOG${NC} | ${GREEN}attackLOG${NC}"
+  echo -e "    minimalLOG = nur kritische Meldungen (Workflow-relevant)"
+  echo -e "    debugLOG   = erweiterte Logs (Debug + Error + Critical)"
+  echo -e "    attackLOG  = wie debugLOG (Platzhalter für zukünftige Angriffsanalyse)"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Service (all/voice/http/discord/dsgvo/ws/oauth): ${NC}")" SERVICE
+  if [ -z "$SERVICE" ]; then
+    log_warn "Kein Service eingegeben"
+    return
+  fi
+
+  # Validate service name
+  case "$SERVICE" in
+    all|voice|http|discord|dsgvo|ws|oauth) ;;
+    *)
+      log_error "Unbekannter Service: $SERVICE (erlaubt: all, voice, http, discord, dsgvo, ws, oauth)"
+      return
+      ;;
+  esac
+
+  read -r -p "$(echo -e "${CYAN}Log-Level (minimalLOG/debugLOG/attackLOG): ${NC}")" LEVEL
+  if [ -z "$LEVEL" ]; then
+    log_warn "Kein Level eingegeben"
+    return
+  fi
+
+  # Validate log level
+  case "$LEVEL" in
+    minimalLOG|debugLOG|attackLOG) ;;
+    *)
+      log_error "Unbekanntes Log-Level: $LEVEL (erlaubt: minimalLOG, debugLOG, attackLOG)"
+      return
+      ;;
+  esac
+
+  local JSON_BODY
+  if [ "$SERVICE" = "all" ]; then
+    JSON_BODY="{\"level\":\"$LEVEL\"}"
+  else
+    JSON_BODY="{\"service\":\"$SERVICE\",\"level\":\"$LEVEL\"}"
+  fi
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/log-level" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "$JSON_BODY" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    log_ok "Log-Level für ${SERVICE} auf ${LEVEL} gesetzt"
+  else
+    log_error "Fehler: $RESPONSE"
+  fi
+}
+
+# --------------------------------------------------
 # Interaktives Menü (Tools)
 # --------------------------------------------------
 do_menu() {
@@ -946,7 +1104,6 @@ do_menu() {
     echo -e "${CYAN} 2) Service stoppen${NC}"
     echo -e "${CYAN} 3) Service neustarten${NC}"
     echo -e "${CYAN} 4) Service Status & Healthcheck${NC}"
-    echo -e "${CYAN} 5) channels.json bearbeiten${NC}"
     echo -e "${CYAN} 6) Backend Healthcheck testen${NC}"
     echo -e "${CYAN} 7) Backend Testlog anzeigen (tail)${NC}"
     echo -e "${CYAN} 8) Backend Live-Logs verfolgen (journalctl -f)${NC}"
@@ -956,7 +1113,6 @@ do_menu() {
     echo -e "${CYAN}--- DSGVO Compliance ---${NC}"
     echo -e "${CYAN}20) DSGVO Status anzeigen${NC}"
     echo -e "${CYAN}21) DSGVO Compliance Modus an/aus${NC}"
-    echo -e "${CYAN}22) Debug Modus an/aus${NC}"
     echo -e "${CYAN}23) Userdaten löschen (Discord ID)${NC}"
     echo -e "${CYAN}24) Guilddaten löschen (Guild ID)${NC}"
     echo -e "${CYAN}25) DSGVO Cleanup manuell ausführen${NC}"
@@ -964,6 +1120,7 @@ do_menu() {
     echo -e "${CYAN}30) Kanal-Sync Status anzeigen${NC}"
     echo -e "${CYAN}31) Kanal-Sync jetzt auslösen${NC}"
     echo -e "${CYAN}32) Kanal-Sync Intervall ändern${NC}"
+    echo -e "${CYAN}33) channels.json bearbeiten${NC}"
     echo -e "${CYAN}--- Ban Management ---${NC}"
     echo -e "${CYAN}40) Benutzer bannen${NC}"
     echo -e "${CYAN}41) Benutzer entbannen${NC}"
@@ -978,6 +1135,9 @@ do_menu() {
     echo -e "${CYAN}62) Traefik Live-Logs${NC}"
     echo -e "${CYAN}63) Domain ändern${NC}"
     echo -e "${CYAN}64) Let's Encrypt Zertifikat prüfen${NC}"
+    echo -e "${CYAN}--- Logging ---${NC}"
+    echo -e "${CYAN}70) Log-Level Status anzeigen${NC}"
+    echo -e "${CYAN}71) Log-Level setzen${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -997,21 +1157,7 @@ do_menu() {
         do_status
         ;;
       5)
-        log_input "Öffne: $CHANNEL_MAP"
-        nano "$CHANNEL_MAP"
-
-        ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
-        if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
-          if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
-            log_ok "channels.json neu geladen (/admin/reload)"
-          else
-            log_warn "Reload fehlgeschlagen – starte Backend neu"
-            do_restart
-          fi
-        else
-          log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
-          do_restart
-        fi
+        log_warn "Menüpunkt 5 wurde nach 33 verschoben (Kanal-Sync Bereich)."
         ;;
       6)
         log_info "Healthcheck: http://127.0.0.1:3000/health"
@@ -1035,9 +1181,12 @@ do_menu() {
         read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" ACTION_IN
         ACTION_IN="${ACTION_IN:-start}"
 
-        if curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
+        # Validate numeric freqId
+        if ! [[ "$FREQ_ID_IN" =~ ^[0-9]+$ ]]; then
+          log_error "Ungültige freqId: '$FREQ_ID_IN' (muss eine Zahl sein)"
+        elif curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
           -H "content-type: application/json" \
-          -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"${ACTION_IN}\"}" >/dev/null; then
+          -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"$(json_escape "$ACTION_IN")\"}" >/dev/null; then
           log_ok "TX Event gesendet"
         else
           log_error "TX Event fehlgeschlagen"
@@ -1062,7 +1211,7 @@ do_menu() {
         do_dsgvo_toggle
         ;;
       22)
-        do_dsgvo_debug_toggle
+        log_warn "Menüpunkt 22 wurde entfernt. Debug-Modus kann über Menüpunkt 50 gesteuert werden."
         ;;
       23)
         do_dsgvo_delete_user
@@ -1083,6 +1232,23 @@ do_menu() {
         ;;
       32)
         do_channel_sync_interval
+        ;;
+      33)
+        log_input "Öffne: $CHANNEL_MAP"
+        nano "$CHANNEL_MAP"
+
+        ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
+        if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
+          if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
+            log_ok "channels.json neu geladen (/admin/reload)"
+          else
+            log_warn "Reload fehlgeschlagen – starte Backend neu"
+            do_restart
+          fi
+        else
+          log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
+          do_restart
+        fi
         ;;
 
       # --- Ban Management ---
@@ -1122,6 +1288,14 @@ do_menu() {
         ;;
       64)
         do_traefik_cert_check
+        ;;
+
+      # --- Logging ---
+      70)
+        do_logging_status
+        ;;
+      71)
+        do_logging_set
         ;;
 
       0)

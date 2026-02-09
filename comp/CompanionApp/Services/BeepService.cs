@@ -75,41 +75,45 @@ public class BeepService : IDisposable
     }
 
     /// <summary>
-    /// Emergency TX start - ascending two-tone alert
+    /// Emergency TX start - urgent ascending siren (3 tones, louder)
     /// </summary>
     public async void PlayEmergencyTxBeep()
     {
         if (!_enabled) return;
-        PlayBeep(1200, 70);
-        await System.Threading.Tasks.Task.Delay(50);
-        PlayBeep(1500, 70);
+        PlayBeep(1200, 80, 0.55f);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1500, 80, 0.55f);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1800, 120, 0.6f);
     }
 
     /// <summary>
-    /// Emergency TX end - descending two-tone
+    /// Emergency TX end - descending three-tone
     /// </summary>
     public async void PlayEmergencyTxEndBeep()
     {
         if (!_enabled) return;
-        PlayBeep(1200, 70);
-        await System.Threading.Tasks.Task.Delay(50);
-        PlayBeep(900, 70);
+        PlayBeep(1500, 80, 0.55f);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1200, 80, 0.55f);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(900, 120, 0.55f);
     }
 
     /// <summary>
-    /// Emergency RX start - triple-pulse alert
+    /// Emergency RX start - rapid triple-pulse alert (louder, higher pitch)
     /// </summary>
     public async void PlayEmergencyRxBeep()
     {
         if (!_enabled) return;
-        PlayBeep(1400, 50);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(1400, 50);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(1400, 50);
+        PlayBeep(1600, 60, 0.55f);
+        await System.Threading.Tasks.Task.Delay(30);
+        PlayBeep(1600, 60, 0.55f);
+        await System.Threading.Tasks.Task.Delay(30);
+        PlayBeep(1800, 80, 0.6f);
     }
 
-    private void PlayBeep(int frequency, int durationMs)
+    private void PlayBeep(int frequency, int durationMs, float volumeMultiplier = 0.3f)
     {
         try
         {
@@ -131,7 +135,7 @@ public class BeepService : IDisposable
                 else if (i > sampleCount * 0.8)
                     envelope = (sampleCount - i) / (sampleCount * 0.2);
 
-                samples[i] = (float)(Math.Sin(2 * Math.PI * frequency * time) * 0.3 * envelope);
+                samples[i] = (float)(Math.Sin(2 * Math.PI * frequency * time) * volumeMultiplier * envelope);
             }
 
             var waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);

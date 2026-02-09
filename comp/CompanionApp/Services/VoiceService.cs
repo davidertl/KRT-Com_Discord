@@ -136,6 +136,14 @@ public sealed class VoiceService : IDisposable
     /// </summary>
     public async Task ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
     {
+        // Validate host
+        if (string.IsNullOrWhiteSpace(host))
+            throw new ArgumentException("Voice host cannot be empty.", nameof(host));
+
+        // Validate port range (1-65535)
+        if (wsPort < 1 || wsPort > 65535)
+            throw new ArgumentOutOfRangeException(nameof(wsPort), $"Port must be between 1 and 65535, got {wsPort}.");
+
         _host = host;
         _wsPort = wsPort;
         _discordUserId = discordUserId;

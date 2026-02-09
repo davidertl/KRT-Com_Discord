@@ -1,4 +1,4 @@
-# KRT-Com / das-krt – Funkkommunikation für Discord
+# das-krt.com – Funkkommunikation für Discord
 
 KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
@@ -80,7 +80,7 @@ KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an 
 - Identität über Discord OAuth2 verifiziert (kein Self-Reporting)
 - Guild-Mitgliedschaft wird serverseitig via Discord Bot geprüft
 - Anzeigename = Server-Nickname (nicht global_name)
-- Namensänderungen dürfen historisch durchschlagen (keine Historisierung)
+- Namensänderungen von discord werden automatisch synchronisiert (über Bot-Events), jedoch nicht in Echtzeit (max 24h Verzögerung durch Channel-Sync-Intervall) - keine historisierung (kann man das sagen?) von alten Namen, nur der aktuellste Nickname wird gespeichert.
 
 ---
 
@@ -114,7 +114,7 @@ KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an 
 |---|---|
 | **OS** | Windows 10/11 |
 | **Runtime** | .NET 10 |
-| **Audio** | Mikrofon + Lautsprecher/Headset |
+| **Audio** | WASAPI-kompatible Soundkarte (für NAudio) |
 
 ---
 
@@ -122,12 +122,14 @@ KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an 
 
 ### Server-Deployment
 
+Its a 2 script guided install.
+
 ```bash
 # install.sh herunterladen und ausführen
 bash install.sh
 ```
 
-Das Installationsskript ist idempotent und richtet ein:
+Das Installationsskript ist idempotent ( ;) geiles Wort! )  und richtet ein:
 - Node.js Backend unter `/opt/das-krt/backend`
 - Traefik Reverse Proxy mit Let's Encrypt
 - Systemd-Service (`das-krt-backend`)
@@ -173,6 +175,7 @@ bash service.sh [start|stop|restart|status|logs|menu]
 - **Discord OAuth2** (Authorization Code Flow) – keine Self-Reported Identity
 - **HMAC-SHA256 Token-Auth** mit 24h Expiry
 - Server-seitige Guild-Mitgliedschaftsprüfung via Discord Bot
+- aktuell nur Single Guild-Mitgliedschaft.
 - Debug-Login (`POST /auth/login`) nur im Debug-Modus verfügbar (HTTP 410 im Normalbetrieb)
 
 ### Datenschutz (DSGVO)
@@ -181,7 +184,7 @@ bash service.sh [start|stop|restart|status|logs|menu]
 - Automatische Datenmigration bestehender Raw-IDs beim Serverstart
 - Auto-Cleanup (2 Tage Aufbewahrung, 7 Tage im Debug-Modus)
 - Privacy Policy Consent Flow (versioniert)
-- Vollständige Datenlöschung pro User oder Guild auf Anfrage
+- Vollständige Datenlöschung pro User oder Guild durch service.sh (durch Admin). 
 
 ### Zugriffsschutz
 
@@ -233,3 +236,4 @@ SQLite WAL mit 8 Tabellen:
 - [ ] Subgruppen / zusätzliche Verschlüsselung (Keyphrase-Hashing)
 - [ ] Externe Statusanzeige
 - [ ] ban2fail / Under-Attack-Mode
+- [ ] multi Guild Support (aktuell auf eine Guild limitiert)

@@ -1518,7 +1518,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task ConnectVoiceAsync()
     {
-        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort} userId={DiscordUserId} guildId={GuildId}");
+        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort}");
 
         if (_voice != null)
         {

@@ -234,15 +234,36 @@
                   <StackPanel Grid.Column="2">
                     <TextBlock Text="EMERGENCY" FontWeight="Bold" FontSize="14" 
                                Foreground="{StaticResource EmergencyBorder}" Margin="0,0,0,6"/>
-                    <Border Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
-                      <StackPanel>
-                        <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
-                                   Foreground="{StaticResource FreqDisplayText}"/>
-                        <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
-                                   Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
-                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToHidden}}"/>
-                      </StackPanel>
-                    </Border>
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <!-- Frequency Display -->
+                      <Border Grid.Column="0" Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
+                        <StackPanel>
+                          <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
+                                     Foreground="{StaticResource FreqDisplayText}"/>
+                          <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
+                                     Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                     Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToHidden}}"/>
+                        </StackPanel>
+                      </Border>
+                      <!-- Recent Callers (black display right of frequency) -->
+                      <Border Grid.Column="1" Background="#111111" CornerRadius="4" Padding="8,6" Margin="8,0,0,0" MinWidth="140">
+                        <StackPanel>
+                          <TextBlock Text="Recent:" Foreground="{StaticResource EmergencyBorder}" FontSize="9" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                          <ItemsControl ItemsSource="{Binding EmergencyRadio.RecentTransmissions}" MaxHeight="50">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate>
+                                <TextBlock Text="{Binding}" Foreground="#FF6644" FontSize="10" FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis"/>
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                        </StackPanel>
+                      </Border>
+                    </Grid>
                   </StackPanel>
 
                   <!-- Listener Count -->

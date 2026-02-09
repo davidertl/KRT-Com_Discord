@@ -340,6 +340,8 @@ entryPoints:
     http:
       tls:
         certResolver: letsencrypt
+    forwardedHeaders:
+      insecure: true
     transport:
       respondingTimeouts:
         readTimeout: 0
@@ -369,6 +371,8 @@ http:
       rule: "Host(\`${DOMAIN}\`)"
       entryPoints:
         - websecure
+      middlewares:
+        - set-proto-https
       service: backend
       tls:
         certResolver: letsencrypt
@@ -386,6 +390,10 @@ http:
       redirectScheme:
         scheme: https
         permanent: true
+    set-proto-https:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
 
   services:
     backend:
@@ -463,6 +471,7 @@ const { createStateStore } = require('./src/state');
 const { createVoiceRelay } = require('./src/voice');
 const { createDsgvo } = require('./src/dsgvo');
 const { hashUserId } = require('./src/crypto');
+const logger = require('./src/logger');
 const fs = require('fs');
 
 function mustEnv(name) {
@@ -622,15 +631,30 @@ function migrateUserIdHashing(db) {
   }
 
   // Route WebSocket upgrades by path
-  // DSGVO HTTPS enforcement: reject WS upgrades that didn't come through TLS (Traefik)
+  // DSGVO HTTPS enforcement: reject WS upgrades that didn't come through TLS (Traefik).
+  // For upgrade requests, Express trust-proxy doesn't apply, so we check the raw header
+  // but ONLY trust it when the connection comes from loopback (i.e. from Traefik).
   httpServer.on('upgrade', (req, socket, head) => {
-    const proto = (req.headers['x-forwarded-proto'] || '').toLowerCase();
     if (dsgvo && typeof dsgvo.getStatus === 'function') {
       const status = dsgvo.getStatus();
-      if (status.dsgvoEnabled && proto !== 'https') {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\nHTTPS required (DSGVO compliance)\r\n');
-        socket.destroy();
-        return;
+      if (status.dsgvoEnabled) {
+        const remoteIp = req.socket.remoteAddress || '';
+        const isLoopback = (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1');
+        // Only trust X-Forwarded-Proto from loopback (Traefik); reject direct non-loopback
+        if (isLoopback) {
+          const fwdProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+          console.log(`[dsgvo] WS upgrade from loopback: X-Forwarded-Proto='${fwdProto}' url=${req.url}`);
+          if (fwdProto !== 'https') {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\nHTTPS required (DSGVO compliance)\r\n');
+            socket.destroy();
+            return;
+          }
+        } else {
+          // Direct connection (not through Traefik) — always reject when DSGVO is on
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\nHTTPS required (DSGVO compliance)\r\n');
+          socket.destroy();
+          return;
+        }
       }
     }
 
@@ -674,6 +698,78 @@ function migrateUserIdHashing(db) {
     await bot.start();
   });
 })();
+EOF
+)"
+
+# src/logger.js — Centralized log-level management
+write_file_backup "$SRC_DIR/logger.js" "$(cat <<'EOF'
+'use strict';
+
+/**
+ * Log Levels:
+ *   minimalLOG  — only critical / essential workflow messages
+ *   debugLOG    — extended logging for debugging (debug + error + critical)
+ *   attackLOG   — same as debug for now (placeholder for future threat logging)
+ */
+const VALID_LEVELS = ['minimalLOG', 'debugLOG', 'attackLOG'];
+const LEVEL_RANK  = { minimalLOG: 0, debugLOG: 1, attackLOG: 2 };
+
+const SERVICES = ['voice', 'http', 'discord', 'dsgvo', 'ws', 'oauth'];
+
+// Runtime state: global + per-service overrides (null = use global)
+const logConfig = {
+  global: 'debugLOG',
+};
+for (const s of SERVICES) logConfig[s] = null;
+
+function getEffectiveLevel(service) {
+  return logConfig[service] || logConfig.global;
+}
+
+function shouldLog(service, requiredLevel) {
+  const effective = getEffectiveLevel(service);
+  return LEVEL_RANK[effective] >= LEVEL_RANK[requiredLevel];
+}
+
+/**
+ * Central log function.  Use instead of console.log / console.error.
+ * @param {string} service  — module tag (voice, http, discord, …)
+ * @param {string} level    — minimalLOG | debugLOG | attackLOG
+ * @param  {...any} args    — message parts (same as console.log)
+ */
+function log(service, level, ...args) {
+  if (!shouldLog(service, level)) return;
+  const prefix = `[${service}]`;
+  if (level === 'minimalLOG') {
+    console.error(prefix, ...args);   // critical → stderr
+  } else {
+    console.log(prefix, ...args);
+  }
+}
+
+function setLevel(service, level) {
+  if (!VALID_LEVELS.includes(level)) throw new Error('Invalid log level: ' + level);
+  if (service === 'global' || service === 'all') {
+    logConfig.global = level;
+    // also reset per-service overrides so global takes effect everywhere
+    for (const s of SERVICES) logConfig[s] = null;
+  } else if (SERVICES.includes(service)) {
+    logConfig[service] = level;
+  } else {
+    throw new Error('Unknown service: ' + service);
+  }
+}
+
+function getStatus() {
+  const result = { global: logConfig.global };
+  for (const s of SERVICES) {
+    result[s] = logConfig[s] || logConfig.global;
+    if (logConfig[s]) result[s] += ' (override)';
+  }
+  return result;
+}
+
+module.exports = { log, setLevel, getStatus, shouldLog, VALID_LEVELS, SERVICES };
 EOF
 )"
 
@@ -2118,14 +2214,20 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   const app = express();
   app.use(express.json());
 
-  // Trust proxy headers from Traefik (X-Forwarded-Proto, X-Forwarded-For)
-  app.set('trust proxy', 'loopback');
+  // Trust exactly one proxy hop (Traefik) — makes req.protocol read X-Forwarded-Proto
+  // securely, ignoring forged headers from direct client connections
+  app.set('trust proxy', 1);
 
   // DSGVO HTTPS enforcement: when DSGVO compliance mode is enabled,
   // reject any request that did not arrive via HTTPS (through Traefik).
-  // Health endpoint is exempted so internal monitoring keeps working.
+  // Exemptions: /health, /server-status, /privacy-policy (public, no user data),
+  // and loopback connections (service.sh admin CLI).
   app.use((req, res, next) => {
-    if (req.path === '/health') return next();
+    // Public/info endpoints — no user data, always allowed
+    if (req.path === '/health' || req.path === '/server-status' || req.path === '/privacy-policy') return next();
+    // Allow localhost connections (service.sh admin CLI)
+    const remoteIp = req.ip || req.connection.remoteAddress || '';
+    if (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1') return next();
     if (dsgvo && typeof dsgvo.getStatus === 'function') {
       const status = dsgvo.getStatus();
       if (status.dsgvoEnabled && req.protocol !== 'https') {
@@ -2413,7 +2515,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       };
       const authToken = signToken(authPayload, tokenSecret);
 
-      // Store token in DB (hashed user ID)
+      // Store token in DB (hashed user ID) — remove old tokens for this user first
+      db.prepare('DELETE FROM auth_tokens WHERE discord_user_id = ?').run(hashedId);
       db.prepare(
         'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
       ).run(authToken.substring(0, 64), hashedId, matchedGuildId, displayName, authPayload.iat, authPayload.exp);
@@ -2787,6 +2890,30 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       res.json({ ok: true, data: { ...result, kicked } });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });
+    }
+  });
+
+  // --- Log-Level Management ---
+  const logger = require('./logger');
+
+  app.get('/admin/log-level', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ ok: true, data: logger.getStatus() });
+  });
+
+  app.post('/admin/log-level', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { service, level } = req.body || {};
+    if (!level || !logger.VALID_LEVELS.includes(level)) {
+      return res.status(400).json({ ok: false, error: 'invalid level (valid: ' + logger.VALID_LEVELS.join(', ') + ')' });
+    }
+    const target = service || 'all';
+    try {
+      logger.setLevel(target, level);
+      console.log(`[admin] Log-level set: ${target} → ${level}`);
+      res.json({ ok: true, data: logger.getStatus() });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message });
     }
   });
 

@@ -16,6 +16,12 @@ public class CompanionConfig
     public string VoiceHost { get; set; } = "127.0.0.1";
     public int VoicePort { get; set; } = 3000;
 
+    // Auth token from last successful login
+    public string AuthToken { get; set; } = "";
+
+    // Accepted privacy policy version
+    public string AcceptedPolicyVersion { get; set; } = "";
+
     // App settings
     public bool AutoConnect { get; set; } = true;
     public bool SaveRadioActiveState { get; set; } = true;

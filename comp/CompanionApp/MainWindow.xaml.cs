@@ -47,8 +47,18 @@ public partial class MainWindow : Window
         }
         else
         {
-            await _vm.ConnectVoiceAsync();
+            await _vm.LoginAndConnectAsync();
         }
+    }
+
+    private async void Verify_Click(object sender, RoutedEventArgs e)
+    {
+        await _vm.VerifyServerAsync();
+    }
+
+    private async void AcceptPolicy_Click(object sender, RoutedEventArgs e)
+    {
+        await _vm.AcceptPolicyAsync();
     }
 
     // Hotkey capture handling

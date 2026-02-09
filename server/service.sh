@@ -405,6 +405,120 @@ do_channel_sync_interval() {
 }
 
 # --------------------------------------------------
+# Ban Management
+# --------------------------------------------------
+do_ban_user() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}Discord User ID zum Bannen: ${NC}")" USER_ID
+  if [ -z "$USER_ID" ]; then
+    log_warn "Keine User ID eingegeben"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}Grund (optional): ${NC}")" BAN_REASON
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/ban" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "{\"discordUserId\":\"${USER_ID}\",\"reason\":\"${BAN_REASON}\"}" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    log_ok "User $USER_ID gebannt"
+  else
+    log_error "Fehler: $RESPONSE"
+  fi
+}
+
+do_unban_user() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}Discord User ID zum Entbannen: ${NC}")" USER_ID
+  if [ -z "$USER_ID" ]; then
+    log_warn "Keine User ID eingegeben"
+    return
+  fi
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/unban" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    log_ok "User $USER_ID entbannt"
+  else
+    log_error "Fehler: $RESPONSE"
+  fi
+}
+
+do_list_bans() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  log_info "Banliste:"
+  local RESPONSE
+  RESPONSE="$(curl -sS "http://127.0.0.1:3000/admin/bans" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  if [ -z "$RESPONSE" ]; then
+    log_error "Backend nicht erreichbar"
+    return
+  fi
+
+  echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+  echo ""
+}
+
+do_delete_and_ban() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}Discord User ID zum Löschen und Bannen: ${NC}")" USER_ID
+  if [ -z "$USER_ID" ]; then
+    log_warn "Keine User ID eingegeben"
+    return
+  fi
+
+  read -r -p "$(echo -e "${RED}WARNUNG: Alle Daten für User $USER_ID werden unwiderruflich gelöscht und der User gebannt! Fortfahren? (j/n): ${NC}")" CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[jJ]$ ]]; then
+    log_info "Abgebrochen"
+    return
+  fi
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-and-ban" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    local TOTAL
+    TOTAL="$(echo "$RESPONSE" | grep -o '"totalRows":[0-9]*' | cut -d: -f2)"
+    log_ok "Alle Daten für User $USER_ID gelöscht ($TOTAL Einträge) und User gebannt"
+  else
+    log_error "Fehler: $RESPONSE"
+  fi
+}
+
+# --------------------------------------------------
 # Interaktives Menü (Tools)
 # --------------------------------------------------
 do_menu() {
@@ -438,6 +552,11 @@ do_menu() {
     echo -e "${CYAN}30) Kanal-Sync Status anzeigen${NC}"
     echo -e "${CYAN}31) Kanal-Sync jetzt auslösen${NC}"
     echo -e "${CYAN}32) Kanal-Sync Intervall ändern${NC}"
+    echo -e "${CYAN}--- Ban Management ---${NC}"
+    echo -e "${CYAN}40) Benutzer bannen${NC}"
+    echo -e "${CYAN}41) Benutzer entbannen${NC}"
+    echo -e "${CYAN}42) Banliste anzeigen${NC}"
+    echo -e "${CYAN}43) Löschen und Bannen${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -543,6 +662,20 @@ do_menu() {
         ;;
       32)
         do_channel_sync_interval
+        ;;
+
+      # --- Ban Management ---
+      40)
+        do_ban_user
+        ;;
+      41)
+        do_unban_user
+        ;;
+      42)
+        do_list_bans
+        ;;
+      43)
+        do_delete_and_ban
         ;;
 
       0)

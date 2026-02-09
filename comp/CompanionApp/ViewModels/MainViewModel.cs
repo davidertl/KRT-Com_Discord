@@ -95,6 +95,93 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _voicePort = value; OnPropertyChanged(); }
     }
 
+    // Auth token from last login
+    private string _authToken = "";
+    public string AuthToken
+    {
+        get => _authToken;
+        set { _authToken = value; OnPropertyChanged(); }
+    }
+
+    // Accepted policy version
+    private string _acceptedPolicyVersion = "";
+
+    #endregion
+
+    #region Server Verification
+
+    private bool _isServerVerified;
+    public bool IsServerVerified
+    {
+        get => _isServerVerified;
+        set { _isServerVerified = value; OnPropertyChanged(); OnPropertyChanged(nameof(ServerVerifiedVisibility)); }
+    }
+
+    public Visibility ServerVerifiedVisibility => IsServerVerified ? Visibility.Visible : Visibility.Collapsed;
+
+    private string _serverVersion = "";
+    public string ServerVersion
+    {
+        get => _serverVersion;
+        set { _serverVersion = value; OnPropertyChanged(); }
+    }
+
+    private bool _serverDsgvoEnabled;
+    public bool ServerDsgvoEnabled
+    {
+        get => _serverDsgvoEnabled;
+        set { _serverDsgvoEnabled = value; OnPropertyChanged(); OnPropertyChanged(nameof(DsgvoStatusText)); OnPropertyChanged(nameof(DsgvoStatusColor)); }
+    }
+
+    private bool _serverDebugMode;
+    public bool ServerDebugMode
+    {
+        get => _serverDebugMode;
+        set { _serverDebugMode = value; OnPropertyChanged(); OnPropertyChanged(nameof(DebugModeStatusText)); }
+    }
+
+    private int _serverRetentionDays;
+    public int ServerRetentionDays
+    {
+        get => _serverRetentionDays;
+        set { _serverRetentionDays = value; OnPropertyChanged(); }
+    }
+
+    private string _serverPolicyVersion = "";
+    public string ServerPolicyVersion
+    {
+        get => _serverPolicyVersion;
+        set { _serverPolicyVersion = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); }
+    }
+
+    private string _privacyPolicyText = "";
+    public string PrivacyPolicyText
+    {
+        get => _privacyPolicyText;
+        set { _privacyPolicyText = value; OnPropertyChanged(); }
+    }
+
+    private bool _policyAccepted;
+    public bool PolicyAccepted
+    {
+        get => _policyAccepted;
+        set { _policyAccepted = value; OnPropertyChanged(); OnPropertyChanged(nameof(PolicyNeedsAcceptance)); OnPropertyChanged(nameof(CanLogin)); }
+    }
+
+    public bool PolicyNeedsAcceptance => IsServerVerified && !PolicyAccepted;
+    public bool CanLogin => IsServerVerified && PolicyAccepted;
+
+    public string DsgvoStatusText => ServerDsgvoEnabled ? "DSGVO: Enabled" : "DSGVO: Disabled";
+    public string DsgvoStatusColor => ServerDsgvoEnabled ? "#4AFF9E" : "#FF4A4A";
+    public string DebugModeStatusText => ServerDebugMode ? "Debug: Active" : "Debug: Off";
+
+    private string _verifyStatusText = "";
+    public string VerifyStatusText
+    {
+        get => _verifyStatusText;
+        set { _verifyStatusText = value; OnPropertyChanged(); }
+    }
+
     private bool _isVoiceConnected;
     public bool IsVoiceConnected
     {
@@ -105,6 +192,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(); 
             OnPropertyChanged(nameof(VoiceConnectionIndicator)); 
             OnPropertyChanged(nameof(VoiceConnectButtonText));
+            OnPropertyChanged(nameof(CanLogin));
         }
     }
 
@@ -451,7 +539,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             try
             {
-                await ConnectVoiceAsync();
+                // Auto-verify server first
+                await VerifyServerAsync();
+
+                // If we have a saved auth token and policy is accepted, auto-connect
+                if (IsServerVerified && PolicyAccepted && !string.IsNullOrWhiteSpace(AuthToken))
+                {
+                    await ConnectVoiceAsync();
+                }
             }
             catch
             {
@@ -497,6 +592,157 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             Arguments = folder,
             UseShellExecute = true
         });
+    }
+
+    /// <summary>
+    /// Verify server connection: fetch server status and privacy policy.
+    /// Called when user clicks the "Verify" button.
+    /// </summary>
+    public async Task VerifyServerAsync()
+    {
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            VerifyStatusText = "Please enter host and port first";
+            return;
+        }
+
+        VerifyStatusText = "Verifying server...";
+        IsServerVerified = false;
+        PolicyAccepted = false;
+
+        try
+        {
+            var status = await BackendClient.GetServerStatusAsync(baseUrl);
+            if (status == null)
+            {
+                VerifyStatusText = "Server not reachable or invalid response";
+                return;
+            }
+
+            ServerVersion = status.Version;
+            ServerDsgvoEnabled = status.DsgvoEnabled;
+            ServerDebugMode = status.DebugMode;
+            ServerRetentionDays = status.RetentionDays;
+            ServerPolicyVersion = status.PolicyVersion;
+
+            var policy = await BackendClient.GetPrivacyPolicyAsync(baseUrl);
+            PrivacyPolicyText = policy?.Text ?? "Could not fetch privacy policy.";
+
+            // Check if user already accepted this policy version
+            if (_acceptedPolicyVersion == ServerPolicyVersion)
+            {
+                PolicyAccepted = true;
+            }
+
+            IsServerVerified = true;
+            VerifyStatusText = $"Server verified: {status.Version}";
+            LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode}");
+        }
+        catch (Exception ex)
+        {
+            VerifyStatusText = $"Verification failed: {ex.Message}";
+            LogDebug($"[Verify] Failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Accept the privacy policy for the current server policy version.
+    /// </summary>
+    public async Task AcceptPolicyAsync()
+    {
+        _acceptedPolicyVersion = ServerPolicyVersion;
+        PolicyAccepted = true;
+        MarkGlobalChanged();
+
+        // If we already have an auth token, notify the server
+        if (!string.IsNullOrWhiteSpace(AuthToken))
+        {
+            try
+            {
+                var baseUrl = BuildBaseUrl();
+                using var client = new BackendClient(baseUrl, AdminToken);
+                client.SetAuthToken(AuthToken);
+                await client.AcceptPolicyAsync(ServerPolicyVersion);
+                LogDebug($"[Policy] Accepted policy version {ServerPolicyVersion} on server");
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"[Policy] Server accept failed: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Login to the server and get an auth token. Requires server verification and policy acceptance.
+    /// </summary>
+    public async Task<bool> LoginAndConnectAsync()
+    {
+        if (!IsServerVerified)
+        {
+            StatusText = "Please verify the server first";
+            return false;
+        }
+
+        if (!PolicyAccepted)
+        {
+            StatusText = "Please accept the privacy policy first";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(DiscordUserId) || string.IsNullOrWhiteSpace(GuildId))
+        {
+            StatusText = "Please enter Discord User ID and Guild ID";
+            return false;
+        }
+
+        StatusText = "Logging in...";
+        var baseUrl = BuildBaseUrl();
+
+        try
+        {
+            using var client = new BackendClient(baseUrl, AdminToken);
+            var loginResult = await client.LoginAsync(DiscordUserId, GuildId);
+
+            if (loginResult == null)
+            {
+                StatusText = "Login failed - user not found or access denied";
+                return false;
+            }
+
+            AuthToken = loginResult.Token;
+
+            // Accept policy on server if needed
+            if (!loginResult.PolicyAccepted && !string.IsNullOrEmpty(AuthToken))
+            {
+                client.SetAuthToken(AuthToken);
+                await client.AcceptPolicyAsync(loginResult.PolicyVersion);
+            }
+
+            StatusText = $"Logged in as {loginResult.DisplayName}";
+            LogDebug($"[Auth] Login OK: {loginResult.DisplayName}");
+
+            // Now connect voice with the auth token
+            await ConnectVoiceAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Login error: {ex.Message}";
+            LogDebug($"[Auth] Login failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private string BuildBaseUrl()
+    {
+        if (string.IsNullOrWhiteSpace(VoiceHost)) return "";
+        var scheme = VoiceHost.StartsWith("https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+        var cleanHost = VoiceHost
+            .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
+            .TrimEnd('/');
+        return $"{scheme}://{cleanHost}:{VoicePort}";
     }
 
     public async Task StartTestAsync()
@@ -725,6 +971,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         VoiceHost = config.VoiceHost;
         VoicePort = config.VoicePort;
 
+        AuthToken = config.AuthToken;
+        _acceptedPolicyVersion = config.AcceptedPolicyVersion;
+
         AutoConnect = config.AutoConnect;
         SaveRadioActiveState = config.SaveRadioActiveState;
         TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup;
@@ -852,6 +1101,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.VoiceHost = VoiceHost;
         _config.VoicePort = VoicePort;
 
+        _config.AuthToken = AuthToken;
+        _config.AcceptedPolicyVersion = _acceptedPolicyVersion;
+
         _config.AutoConnect = AutoConnect;
         _config.SaveRadioActiveState = SaveRadioActiveState;
         _config.TurnOnEmergencyOnStartup = TurnOnEmergencyOnStartup;
@@ -926,14 +1178,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task SyncFreqNamesAsync()
     {
-        if (string.IsNullOrWhiteSpace(ServerBaseUrl) || string.IsNullOrWhiteSpace(AdminToken))
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(AdminToken))
         {
             return;
         }
 
         try
         {
-            using var client = new BackendClient(ServerBaseUrl, AdminToken);
+            using var client = new BackendClient(baseUrl, AdminToken);
             var entries = RadioPanels
                 .Where(r => r.FreqId >= 1000 && r.FreqId <= 9999)
                 .Select(r => new { r.FreqId, Name = r.Label.Trim() })
@@ -1052,7 +1305,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             StatusText = $"PTT start ({radio.Label} - Freq {radio.FreqId})";
 
             _backend?.Dispose();
-            _backend = new BackendClient(ServerBaseUrl, AdminToken);
+            _backend = new BackendClient(BuildBaseUrl(), AdminToken);
 
             _audio?.Dispose();
             _audio = new AudioCaptureService(SelectedAudioInputDevice);
@@ -1211,7 +1464,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _voice.SetMasterInputVolume(InputVolume / 100f);
         _voice.SetMasterOutputVolume(OutputVolume / 100f);
 
-        await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId);
+        await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId, AuthToken);
         IsVoiceConnected = _voice.IsConnected;
 
         // Auto-join all enabled radio frequencies so we receive RX notifications and audio
@@ -1245,10 +1498,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     private async Task FetchAndApplyFreqNamesAsync()
     {
-        if (string.IsNullOrWhiteSpace(ServerBaseUrl)) return;
+        var baseUrl = BuildBaseUrl();
+        if (string.IsNullOrWhiteSpace(baseUrl)) return;
         try
         {
-            using var client = new BackendClient(ServerBaseUrl, AdminToken ?? "");
+            using var client = new BackendClient(baseUrl, AdminToken ?? "");
             var freqNames = await client.GetFreqNamesAsync();
             if (freqNames.Count == 0) return;
 

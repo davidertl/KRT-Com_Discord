@@ -91,6 +91,7 @@ public sealed class VoiceService : IDisposable
     private int _wsPort = 3000;
     private string _discordUserId = "";
     private string _guildId = "";
+    private string _authToken = "";
 
     public bool IsConnected { get; private set; }
 
@@ -133,12 +134,13 @@ public sealed class VoiceService : IDisposable
     /// <summary>
     /// Connect to the voice relay server.
     /// </summary>
-    public async Task ConnectAsync(string host, int wsPort, string discordUserId, string guildId)
+    public async Task ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
     {
         _host = host;
         _wsPort = wsPort;
         _discordUserId = discordUserId;
         _guildId = guildId;
+        _authToken = authToken ?? "";
 
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
@@ -174,8 +176,10 @@ public sealed class VoiceService : IDisposable
 
         Status("WebSocket connected, sending auth...");
 
-        // Send auth message
-        var auth = new { type = "auth", discordUserId, guildId };
+        // Send auth message (prefer token-based auth if available)
+        var auth = string.IsNullOrEmpty(_authToken)
+            ? new { type = "auth", discordUserId, guildId, authToken = (string?)null }
+            : new { type = "auth", discordUserId, guildId, authToken = (string?)_authToken };
         await WsSendAsync(auth, ct);
 
         // Start WS receive loop (will process auth_ok with UDP port)

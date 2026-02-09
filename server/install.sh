@@ -206,6 +206,63 @@ else
   log_ok "channels.json existiert bereits: $CHANNEL_MAP (nicht überschrieben)"
 fi
 
+# Privacy Policy (default, can be customized by operator)
+PRIVACY_POLICY_FILE="$APP_ROOT/config/privacy-policy.md"
+if [ ! -f "$PRIVACY_POLICY_FILE" ]; then
+  cat > "$PRIVACY_POLICY_FILE" <<'POLICYEOF'
+# Privacy Policy
+
+This project is a **self-hosted open-source software**.
+Responsibility for operation, configuration, and legal compliance lies entirely with the **server operator**.
+
+## 1. Principles
+
+- Only data strictly required for technical operation is processed
+- No hidden data collection, telemetry, or analytics
+- All data remains exclusively on the operator's server
+
+## 2. Data Processed
+
+- **User Identifiers**: Discord display names (server nicknames only, changeable by user)
+- **Authentication**: Temporary signed tokens with automatic expiration
+- **Sessions**: Active connection state (ephemeral, cleared on restart)
+- **Logs**: Connection events, errors (configurable retention, no audio content)
+- **Audio**: Never recorded or stored - live transmission only
+
+## 3. Data Retention
+
+Retention periods are configurable by the server operator:
+- DSGVO compliance mode: 2 days automatic cleanup
+- Debug mode: 7 days automatic cleanup
+- Retention can be disabled entirely
+
+## 4. Data Deletion
+
+A hard delete removes all stored data for a user.
+Deletion is irreversible. Deleted users are added to a ban list (ID + timestamp only) to prevent re-registration.
+
+## 5. Data Sharing
+
+No data is shared with third parties. No cloud services, no tracking, no statistics collection.
+
+## 6. Server Operator Responsibility
+
+The server operator is responsible for log retention configuration, compliance with local data protection laws, and secure infrastructure operation.
+
+## 7. Open Source
+
+The complete source code is publicly available and auditable.
+
+## 8. Changes
+
+Any changes affecting data handling are documented in the changelog.
+POLICYEOF
+  chown "$ADMIN_USER:$ADMIN_USER" "$PRIVACY_POLICY_FILE" 2>/dev/null || true
+  log_ok "Privacy Policy erstellt: $PRIVACY_POLICY_FILE"
+else
+  log_ok "Privacy Policy existiert bereits: $PRIVACY_POLICY_FILE (nicht überschrieben)"
+fi
+
 # ==========================================================
 # PHASE 3: Backend Source Code Deployment
 # ==========================================================
@@ -229,6 +286,7 @@ const { createMappingStore } = require('./src/mapping');
 const { createStateStore } = require('./src/state');
 const { createVoiceRelay } = require('./src/voice');
 const { createDsgvo } = require('./src/dsgvo');
+const fs = require('fs');
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -249,6 +307,14 @@ function mustEnv(name) {
   const txStore = createTxStore(db);
   const usersStore = createUsersStore(db);
 
+  const tokenSecret = process.env.TOKEN_SECRET || '';
+  if (!tokenSecret) console.warn('[WARN] TOKEN_SECRET not set - token-based auth will be disabled');
+
+  const policyVersion = process.env.POLICY_VERSION || '1.0';
+  let policyText = 'No privacy policy configured.';
+  const policyPath = process.env.POLICY_PATH || path.join(__dirname, '..', 'config', 'privacy-policy.md');
+  try { policyText = fs.readFileSync(policyPath, 'utf-8'); } catch { console.warn('[WARN] Privacy policy file not found:', policyPath); }
+
   const dsgvo = createDsgvo({
     db,
     dsgvoEnabled: process.env.DSGVO_ENABLED === 'true',
@@ -268,6 +334,9 @@ function mustEnv(name) {
     allowedGuildIds: process.env.DISCORD_GUILD_ID
       ? process.env.DISCORD_GUILD_ID.split(',')
       : [],
+    tokenSecret,
+    policyVersion,
+    policyText,
   });
 
   const wsHub = createWsHub({ stateStore });
@@ -279,6 +348,8 @@ function mustEnv(name) {
     allowedGuildIds: process.env.DISCORD_GUILD_ID
       ? process.env.DISCORD_GUILD_ID.split(',') 
       : [],
+    tokenSecret,
+    dsgvo,
   });
   voiceRelay.start();
 
@@ -407,6 +478,37 @@ function initDb(dbPath) {
 
     CREATE INDEX IF NOT EXISTS idx_voice_sessions_user
       ON voice_sessions(discord_user_id);
+
+    -- Banned users (minimal: user ID + timestamp + optional reason)
+    CREATE TABLE IF NOT EXISTS banned_users (
+      discord_user_id TEXT PRIMARY KEY,
+      banned_at_ms    INTEGER NOT NULL,
+      reason          TEXT
+    );
+
+    -- Auth tokens (issued by POST /auth/login)
+    CREATE TABLE IF NOT EXISTS auth_tokens (
+      token_id        TEXT PRIMARY KEY,
+      discord_user_id TEXT NOT NULL,
+      guild_id        TEXT NOT NULL,
+      display_name    TEXT,
+      created_at_ms   INTEGER NOT NULL,
+      expires_at_ms   INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auth_tokens_user
+      ON auth_tokens(discord_user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires
+      ON auth_tokens(expires_at_ms);
+
+    -- Privacy policy acceptance tracking
+    CREATE TABLE IF NOT EXISTS policy_acceptance (
+      discord_user_id TEXT NOT NULL,
+      policy_version  TEXT NOT NULL,
+      accepted_at_ms  INTEGER NOT NULL,
+      PRIMARY KEY (discord_user_id, policy_version)
+    );
   `);
 
   return db;
@@ -495,6 +597,7 @@ write_file_backup "$SRC_DIR/voice.js" "$(cat <<'EOF'
 
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
+const { verifyToken } = require('./crypto');
 
 /**
  * Voice Relay
@@ -503,7 +606,7 @@ const crypto = require('crypto');
  * - Opus audio is exchanged as binary WebSocket frames
  * - Packet format: [4 bytes freqId BE][4 bytes sequence BE][opus data]
  */
-function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
+function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = '', dsgvo = null }) {
   // Session management
   const sessions = new Map();       // sessionToken -> { discordUserId, guildId, displayName, ws, frequencies: Set, lastSeen }
 
@@ -610,20 +713,43 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
   }
 
   function handleAuth(ws, msg, setToken) {
-    const { discordUserId, guildId } = msg;
-    if (!discordUserId || !guildId) {
+    const { discordUserId, guildId, authToken } = msg;
+
+    let resolvedUserId = discordUserId;
+    let resolvedGuildId = guildId;
+    let resolvedDisplayName = null;
+
+    // Token-based auth (preferred): verify signed token from /auth/login
+    if (authToken && tokenSecret) {
+      const payload = verifyToken(authToken, tokenSecret);
+      if (!payload) {
+        ws.send(JSON.stringify({ type: 'auth_error', reason: 'invalid or expired token' }));
+        return;
+      }
+      resolvedUserId = payload.uid;
+      resolvedGuildId = payload.gid;
+      resolvedDisplayName = payload.name;
+    }
+
+    if (!resolvedUserId || !resolvedGuildId) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'missing credentials' }));
       return;
     }
 
     // Check allowed guilds
-    if (allowedGuildIds.length > 0 && !allowedGuildIds.includes(String(guildId))) {
+    if (allowedGuildIds.length > 0 && !allowedGuildIds.includes(String(resolvedGuildId))) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'guild not allowed' }));
       return;
     }
 
+    // Check if banned
+    if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(String(resolvedUserId))) {
+      ws.send(JSON.stringify({ type: 'auth_error', reason: 'access denied' }));
+      return;
+    }
+
     // Look up user
-    const user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : null;
+    const user = usersStore ? usersStore.get(String(resolvedUserId), String(resolvedGuildId)) : null;
     if (!user) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'user not found in guild' }));
       return;
@@ -633,10 +759,11 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
     const sessionToken = crypto.randomBytes(24).toString('hex');
     const now = Date.now();
 
+    const displayName = resolvedDisplayName || user.display_name || String(resolvedUserId);
     const session = {
-      discordUserId: String(discordUserId),
-      guildId: String(guildId),
-      displayName: user.display_name || String(discordUserId),
+      discordUserId: String(resolvedUserId),
+      guildId: String(resolvedGuildId),
+      displayName,
       ws,
       frequencies: new Set(),
       mutedFreqs: new Set(),   // freqIds where this user is RX-muted (server won't forward audio)
@@ -871,6 +998,54 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
 }
 
 module.exports = { createVoiceRelay };
+EOF
+)"
+
+# src/crypto.js - Token signing & verification utilities
+write_file_backup "$SRC_DIR/crypto.js" "$(cat <<'EOF'
+'use strict';
+
+const crypto = require('crypto');
+
+/**
+ * Sign a token payload using HMAC-SHA256.
+ * Returns: base64url(payload).base64url(signature)
+ */
+function signToken(payload, secret) {
+  const payloadStr = JSON.stringify(payload);
+  const payloadB64 = Buffer.from(payloadStr).toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  return payloadB64 + '.' + sig;
+}
+
+/**
+ * Verify and decode a signed token. Returns payload object or null.
+ */
+function verifyToken(token, secret) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payloadB64, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  if (sig !== expectedSig) return null;
+  try {
+    const payloadStr = Buffer.from(payloadB64, 'base64url').toString('utf-8');
+    const payload = JSON.parse(payloadStr);
+    if (payload.exp && Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate a random session token.
+ */
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+module.exports = { signToken, verifyToken, generateSessionToken };
 EOF
 )"
 
@@ -1475,6 +1650,10 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
       warnings.push('A debug tool is currently active — automatic cleanup is paused');
     }
 
+    // Ban count
+    const banCountRow = db.prepare('SELECT COUNT(*) as cnt FROM banned_users').get();
+    const bannedCount = banCountRow ? banCountRow.cnt : 0;
+
     return {
       dsgvoEnabled: _enabled,
       debugMode: _debugMode,
@@ -1482,8 +1661,60 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
       retentionDays: _debugMode ? 7 : 2,
       schedulerRunning: !!_schedulerHandle,
       lastCleanup: _lastCleanup,
+      bannedCount,
       warnings,
     };
+  }
+
+  // --- Ban management ---
+
+  function banUser(discordUserId, reason) {
+    const uid = String(discordUserId);
+    db.prepare(
+      'INSERT OR REPLACE INTO banned_users (discord_user_id, banned_at_ms, reason) VALUES (?, ?, ?)'
+    ).run(uid, Date.now(), reason || null);
+    console.log('[dsgvo] Banned user', uid);
+  }
+
+  function unbanUser(discordUserId) {
+    const uid = String(discordUserId);
+    const result = db.prepare('DELETE FROM banned_users WHERE discord_user_id = ?').run(uid);
+    console.log('[dsgvo] Unbanned user', uid, 'rows:', result.changes);
+    return result.changes > 0;
+  }
+
+  function isBanned(discordUserId) {
+    const row = db.prepare('SELECT 1 FROM banned_users WHERE discord_user_id = ?').get(String(discordUserId));
+    return !!row;
+  }
+
+  function listBanned() {
+    return db.prepare('SELECT discord_user_id, banned_at_ms, reason FROM banned_users ORDER BY banned_at_ms DESC').all();
+  }
+
+  /**
+   * Delete all user data and add to ban list (prevents re-registration).
+   */
+  function deleteAndBanUser(discordUserId, reason) {
+    const deleteResult = deleteUser(discordUserId);
+    banUser(discordUserId, reason || 'data deletion');
+    return { ...deleteResult, banned: true };
+  }
+
+  // --- Policy acceptance ---
+
+  function hasPolicyAcceptance(discordUserId, policyVersion) {
+    const row = db.prepare(
+      'SELECT 1 FROM policy_acceptance WHERE discord_user_id = ? AND policy_version = ?'
+    ).get(String(discordUserId), String(policyVersion));
+    return !!row;
+  }
+
+  function acceptPolicy(discordUserId, policyVersion) {
+    db.prepare(
+      'INSERT OR REPLACE INTO policy_acceptance (discord_user_id, policy_version, accepted_at_ms) VALUES (?, ?, ?)'
+    ).run(String(discordUserId), String(policyVersion), Date.now());
+    console.log('[dsgvo] User', discordUserId, 'accepted policy version', policyVersion);
   }
 
   return {
@@ -1496,6 +1727,13 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
     setDebugMode,
     setDebugToolActive,
     getStatus,
+    banUser,
+    unbanUser,
+    isBanned,
+    listBanned,
+    deleteAndBanUser,
+    hasPolicyAcceptance,
+    acceptPolicy,
   };
 }
 
@@ -1510,14 +1748,126 @@ write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds }) {
+function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds, tokenSecret, policyVersion, policyText }) {
   const app = express();
   app.use(express.json());
+
+  const { signToken, verifyToken } = require('./crypto');
 
   let onTxEventFn = null;
   let _bot = bot;
 
   app.get('/health', (req, res) => res.json({ ok: true }));
+
+  // --- Public endpoints (no auth required) ---
+
+  // Server status: version, DSGVO mode, debug mode, policy version
+  app.get('/server-status', (req, res) => {
+    const status = dsgvo ? dsgvo.getStatus() : {};
+    res.json({
+      ok: true,
+      data: {
+        version: 'Alpha 0.0.3',
+        dsgvoEnabled: status.dsgvoEnabled || false,
+        debugMode: status.debugMode || false,
+        retentionDays: status.retentionDays || 0,
+        policyVersion: policyVersion || '1.0',
+      },
+    });
+  });
+
+  // Privacy policy text
+  app.get('/privacy-policy', (req, res) => {
+    res.json({
+      ok: true,
+      data: {
+        version: policyVersion || '1.0',
+        text: policyText || 'No privacy policy configured on this server.',
+      },
+    });
+  });
+
+  // --- Auth endpoints ---
+
+  // Login: verify user exists in guild, issue signed token
+  app.post('/auth/login', (req, res) => {
+    const { discordUserId, guildId } = req.body || {};
+    if (!discordUserId || !guildId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId or guildId' });
+    }
+
+    // Check allowed guilds
+    if (allowedGuildIds.length > 0 && !allowedGuildIds.includes(String(guildId))) {
+      return res.status(403).json({ ok: false, error: 'guild not allowed' });
+    }
+
+    // Check if banned
+    if (dsgvo && typeof dsgvo.isBanned === 'function' && dsgvo.isBanned(String(discordUserId))) {
+      return res.status(403).json({ ok: false, error: 'access denied' });
+    }
+
+    // Look up user in guild
+    const user = usersStore ? usersStore.get(String(discordUserId), String(guildId)) : null;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'user not found in guild' });
+    }
+
+    // Check policy acceptance
+    const policyAccepted = dsgvo
+      ? dsgvo.hasPolicyAcceptance(String(discordUserId), policyVersion || '1.0')
+      : true;
+
+    if (!tokenSecret) {
+      return res.status(500).json({ ok: false, error: 'server token secret not configured' });
+    }
+
+    // Issue signed token (24h expiry)
+    const payload = {
+      uid: String(discordUserId),
+      gid: String(guildId),
+      name: user.display_name || String(discordUserId),
+      iat: Date.now(),
+      exp: Date.now() + 24 * 60 * 60 * 1000,
+    };
+    const token = signToken(payload, tokenSecret);
+
+    // Store token reference in DB
+    db.prepare(
+      'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
+    ).run(token.substring(0, 64), String(discordUserId), String(guildId), payload.name, payload.iat, payload.exp);
+
+    res.json({
+      ok: true,
+      data: {
+        token,
+        displayName: payload.name,
+        policyVersion: policyVersion || '1.0',
+        policyAccepted,
+      },
+    });
+  });
+
+  // Accept privacy policy
+  app.post('/auth/accept-policy', (req, res) => {
+    const authHeader = req.header('authorization') || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!token || !tokenSecret) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const payload = verifyToken(token, tokenSecret);
+    if (!payload) {
+      return res.status(401).json({ ok: false, error: 'invalid or expired token' });
+    }
+
+    const { version } = req.body || {};
+    const pv = version || policyVersion || '1.0';
+
+    if (dsgvo && typeof dsgvo.acceptPolicy === 'function') {
+      dsgvo.acceptPolicy(payload.uid, pv);
+    }
+
+    res.json({ ok: true, data: { accepted: true, version: pv } });
+  });
 
   app.get('/state/:discordUserId', (req, res) => {
     const row = stateStore.get(req.params.discordUserId);
@@ -1744,6 +2094,59 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     res.json({ ok: true, data: _bot.getSyncStatus() });
   });
 
+  // --- Ban management endpoints ---
+
+  app.post('/admin/ban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { discordUserId, reason } = req.body || {};
+    if (!discordUserId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId' });
+    }
+    if (dsgvo && typeof dsgvo.banUser === 'function') {
+      dsgvo.banUser(String(discordUserId), reason || null);
+      res.json({ ok: true });
+    } else {
+      res.status(500).json({ ok: false, error: 'dsgvo module not available' });
+    }
+  });
+
+  app.post('/admin/unban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { discordUserId } = req.body || {};
+    if (!discordUserId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId' });
+    }
+    if (dsgvo && typeof dsgvo.unbanUser === 'function') {
+      const removed = dsgvo.unbanUser(String(discordUserId));
+      res.json({ ok: true, data: { removed } });
+    } else {
+      res.status(500).json({ ok: false, error: 'dsgvo module not available' });
+    }
+  });
+
+  app.get('/admin/bans', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    if (dsgvo && typeof dsgvo.listBanned === 'function') {
+      res.json({ ok: true, data: dsgvo.listBanned() });
+    } else {
+      res.json({ ok: true, data: [] });
+    }
+  });
+
+  app.post('/admin/dsgvo/delete-and-ban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { discordUserId, reason } = req.body || {};
+    if (!discordUserId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId' });
+    }
+    if (dsgvo && typeof dsgvo.deleteAndBanUser === 'function') {
+      const result = dsgvo.deleteAndBanUser(String(discordUserId), reason);
+      res.json({ ok: true, data: result });
+    } else {
+      res.status(500).json({ ok: false, error: 'dsgvo module not available' });
+    }
+  });
+
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
   server._setBot = (b) => { _bot = b; };
@@ -1782,6 +2185,10 @@ if [[ "$CONFIGURE_ENV" =~ ^[jJ]$ ]]; then
   BIND_PORT="${BIND_PORT:-3000}"
   read -s -p "$(echo -e "${CYAN}Admin Token (für /admin/reload):${NC} ")" ADMIN_TOKEN; echo ""
 
+  # Generate TOKEN_SECRET for auth token signing
+  TOKEN_SECRET="$(openssl rand -hex 32)"
+  log_ok "TOKEN_SECRET generiert"
+
   cat > "$ENV_FILE" <<EOF
 DISCORD_TOKEN=$DISCORD_TOKEN
 $([ -n "$DISCORD_GUILD_ID" ] && echo "DISCORD_GUILD_ID=$DISCORD_GUILD_ID" || echo "# DISCORD_GUILD_ID=123456789012345678")
@@ -1793,6 +2200,13 @@ DB_PATH=$BACKEND_DIR/state.sqlite
 CHANNEL_MAP_PATH=$CHANNEL_MAP
 
 ADMIN_TOKEN=$ADMIN_TOKEN
+
+# Token signing secret for auth (auto-generated)
+TOKEN_SECRET=$TOKEN_SECRET
+
+# Privacy policy
+POLICY_VERSION=1.0
+POLICY_PATH=$APP_ROOT/config/privacy-policy.md
 
 # DSGVO compliance mode: auto-delete user data older than 2 days (7 in debug mode)
 DSGVO_ENABLED=false
@@ -1823,6 +2237,7 @@ REQUIRED_FILES=(
   "$SRC_DIR/users.js"
   "$SRC_DIR/voice.js"
   "$SRC_DIR/dsgvo.js"
+  "$SRC_DIR/crypto.js"
   "$BACKEND_DIR/index.js"
 )
 

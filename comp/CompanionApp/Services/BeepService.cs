@@ -68,6 +68,41 @@ public class BeepService : IDisposable
         PlayBeep(TxStartFreq, 60);
     }
 
+    /// <summary>
+    /// Emergency TX start - ascending two-tone alert
+    /// </summary>
+    public async void PlayEmergencyTxBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1200, 70);
+        await System.Threading.Tasks.Task.Delay(50);
+        PlayBeep(1500, 70);
+    }
+
+    /// <summary>
+    /// Emergency TX end - descending two-tone
+    /// </summary>
+    public async void PlayEmergencyTxEndBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1200, 70);
+        await System.Threading.Tasks.Task.Delay(50);
+        PlayBeep(900, 70);
+    }
+
+    /// <summary>
+    /// Emergency RX start - triple-pulse alert
+    /// </summary>
+    public async void PlayEmergencyRxBeep()
+    {
+        if (!_enabled) return;
+        PlayBeep(1400, 50);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1400, 50);
+        await System.Threading.Tasks.Task.Delay(40);
+        PlayBeep(1400, 50);
+    }
+
     private void PlayBeep(int frequency, int durationMs)
     {
         try

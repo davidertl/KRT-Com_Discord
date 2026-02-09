@@ -182,6 +182,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged();
             OnPropertyChanged(nameof(EmergencyRadioVisibility));
             MarkGlobalChanged();
+            PushRadioSettingsToVoice(EmergencyRadio);
         }
     }
 
@@ -333,11 +334,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 AdvancedMode = false
             };
             panel.UnsavedChangesOccurred += MarkGlobalChanged;
+            panel.PropertyChanged += OnRadioPanelPropertyChanged;
             RadioPanels.Add(panel);
         }
 
         // Set up emergency radio
         EmergencyRadio.UnsavedChangesOccurred += MarkGlobalChanged;
+        EmergencyRadio.PropertyChanged += OnRadioPanelPropertyChanged;
 
         // Load audio devices
         LoadAudioDevices();
@@ -993,7 +996,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             IsStreaming = true;
-            _beepService?.PlayTxStartBeep();
+            if (radio.IsEmergencyRadio)
+                _beepService?.PlayEmergencyTxBeep();
+            else
+                _beepService?.PlayTxStartBeep();
         }
         catch (Exception ex)
         {
@@ -1048,7 +1054,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         IsStreaming = false;
-        _beepService?.PlayTxEndBeep();
+        if (radio?.IsEmergencyRadio == true)
+            _beepService?.PlayEmergencyTxEndBeep();
+        else
+            _beepService?.PlayTxEndBeep();
         StatusText = "PTT stop";
     }
 
@@ -1089,7 +1098,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             LogDebug($"[Voice] Error: {ex}");
             Application.Current.Dispatcher.Invoke(() => StatusText = $"Voice error: {ex.Message}");
         };
-        _voice.AudioReceived += OnVoiceAudioReceived;
+        _voice.RxStateChanged += OnRxStateChanged;
+        _voice.FreqJoined += OnFreqJoined;
         
         // Set output device
         _voice.SetOutputDevice(SelectedAudioOutputDevice);
@@ -1112,30 +1122,88 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
+        // Push per-radio audio settings to VoiceService (volume, pan, mute)
+        if (IsVoiceConnected)
+        {
+            PushAllRadioSettingsToVoice();
+        }
+
         LogDebug($"[Voice] ConnectVoiceAsync done: IsConnected={IsVoiceConnected}");
     }
     
-    private void OnVoiceAudioReceived(string discordUserId, string username, int freqId)
+    private void OnRxStateChanged(string discordUserId, string username, int freqId, string action)
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
-            var timestamp = $"{DateTime.Now:HH:mm} - {username}";
-            
             // Find radio panel matching the frequency
             var matchingRadio = RadioPanels.FirstOrDefault(r => r.IsEnabled && !r.IsMuted && r.FreqId == freqId);
-            if (matchingRadio == null && EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
+            if (matchingRadio == null && EnableEmergencyRadio && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
             {
                 matchingRadio = EmergencyRadio;
             }
-            
-            if (matchingRadio != null)
+
+            if (matchingRadio == null) return;
+
+            if (action == "start")
             {
+                var timestamp = $"{DateTime.Now:HH:mm} - {username}";
                 matchingRadio.AddTransmission(timestamp);
+                matchingRadio.SetReceiving(true);
+
+                // Play appropriate RX beep
+                if (matchingRadio.IsEmergencyRadio)
+                    _beepService?.PlayEmergencyRxBeep();
+                else
+                    _beepService?.PlayRxStartBeep();
             }
-            
-            // Play RX beep for incoming audio
-            _beepService?.PlayRxStartBeep();
+            else if (action == "stop")
+            {
+                matchingRadio.SetReceiving(false);
+            }
         });
+    }
+
+    private void OnFreqJoined(int freqId, int listenerCount)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            var panel = RadioPanels.FirstOrDefault(r => r.FreqId == freqId);
+            if (panel != null)
+                panel.ListenerCount = listenerCount;
+            if (EmergencyRadio.FreqId == freqId)
+                EmergencyRadio.ListenerCount = listenerCount;
+        });
+    }
+
+    private void OnRadioPanelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is not RadioPanelViewModel panel) return;
+        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled")
+        {
+            PushRadioSettingsToVoice(panel);
+        }
+    }
+
+    private void PushRadioSettingsToVoice(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        bool effectiveMuted = panel.IsMuted;
+        if (panel.IsEmergencyRadio)
+            effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
+        else
+            effectiveMuted = effectiveMuted || !panel.IsEnabled;
+
+        _voice.SetFreqSettings(panel.FreqId, panel.Volume / 100f, panel.Balance / 100f, effectiveMuted);
+    }
+
+    private void PushAllRadioSettingsToVoice()
+    {
+        foreach (var panel in RadioPanels)
+        {
+            PushRadioSettingsToVoice(panel);
+        }
+        PushRadioSettingsToVoice(EmergencyRadio);
     }
 
     public async Task DisconnectVoiceAsync()

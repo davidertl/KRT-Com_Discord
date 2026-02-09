@@ -18,17 +18,29 @@ using NAudio.Wave;
 namespace CompanionApp.Services;
 
 /// <summary>
+/// Per-frequency audio settings for volume, panning, and mute.
+/// </summary>
+public class FreqAudioSettings
+{
+    public float Volume { get; set; } = 1.0f;
+    public float Pan { get; set; } = 0.5f; // 0=full left, 0.5=center, 1=full right
+    public bool Muted { get; set; }
+}
+
+/// <summary>
 /// Custom voice transport service.
 /// Uses WebSocket for control signalling (auth, join/leave freq)
-/// and UDP for Opus audio frames.
+/// and binary WebSocket frames for Opus audio.
 /// </summary>
 public sealed class VoiceService : IDisposable
 {
     // ---- events ----
     public event Action<string>? StatusChanged;
     public event Action<Exception>? ErrorOccurred;
-    /// <summary>Raised when audio from another user is received. Args: (discordUserId, username, freqId)</summary>
-    public event Action<string, string, int>? AudioReceived;
+    /// <summary>Raised on RX start/stop. Args: (discordUserId, username, freqId, action)</summary>
+    public event Action<string, string, int, string>? RxStateChanged;
+    /// <summary>Raised when a frequency is joined. Args: (freqId, listenerCount)</summary>
+    public event Action<int, int>? FreqJoined;
 
     // ---- connection state ----
     private ClientWebSocket? _ws;
@@ -50,13 +62,11 @@ public sealed class VoiceService : IDisposable
     private const int OpusFrameSamples = OpusSampleRate * OpusFrameMs / 1000; // 960
     private const int OpusBitrate = 32000;
 
-    // ---- audio playback (per-frequency) ----
+    // ---- audio playback (stereo, per-frequency mixing) ----
     private WasapiOut? _waveOut;
     private BufferedWaveProvider? _waveProvider;
     private string _outputDeviceName = "Default";
-    private bool _isMuted;
-    private float _volume = 1.0f;
-    private float _balance = 0.5f;
+    private readonly ConcurrentDictionary<int, FreqAudioSettings> _freqSettings = new();
     private readonly object _playbackLock = new();
 
     // ---- audio capture buffering ----
@@ -94,9 +104,15 @@ public sealed class VoiceService : IDisposable
         }
     }
 
-    public void SetVolume(float volume) => _volume = Math.Clamp(volume, 0f, 1f);
-    public void SetBalance(float balance) => _balance = Math.Clamp(balance, 0f, 1f);
-    public void SetMuted(bool muted) => _isMuted = muted;
+    /// <summary>
+    /// Set per-frequency audio settings (volume, pan, mute).
+    /// </summary>
+    public void SetFreqSettings(int freqId, float volume, float pan, bool muted)
+    {
+        _freqSettings.AddOrUpdate(freqId,
+            _ => new FreqAudioSettings { Volume = volume, Pan = pan, Muted = muted },
+            (_, s) => { s.Volume = volume; s.Pan = pan; s.Muted = muted; return s; });
+    }
 
     /// <summary>
     /// Connect to the voice relay server.
@@ -416,10 +432,19 @@ public sealed class VoiceService : IDisposable
                     var rxName = root.TryGetProperty("username", out var un) ? un.GetString() ?? rxUser : rxUser;
                     var rxAction = root.TryGetProperty("action", out var ra) ? ra.GetString() : "";
 
-                    if (rxAction == "start")
-                    {
-                        AudioReceived?.Invoke(rxUser, rxName, rxFreqId);
-                    }
+                    RxStateChanged?.Invoke(rxUser, rxName, rxFreqId, rxAction ?? "");
+                    break;
+
+                case "join_ok":
+                    var joinFreqId = root.TryGetProperty("freqId", out var jf) ? jf.GetInt32() : 0;
+                    var joinListeners = root.TryGetProperty("listenerCount", out var jl) ? jl.GetInt32() : 0;
+                    FreqJoined?.Invoke(joinFreqId, joinListeners);
+                    break;
+
+                case "listener_update":
+                    var luFreq = root.TryGetProperty("freqId", out var luf) ? luf.GetInt32() : 0;
+                    var luCount = root.TryGetProperty("listenerCount", out var luc) ? luc.GetInt32() : 0;
+                    FreqJoined?.Invoke(luFreq, luCount);
                     break;
 
                 case "error":
@@ -464,11 +489,16 @@ public sealed class VoiceService : IDisposable
     private void HandleAudioFrame(byte[] data, int length)
     {
         if (length < 9) return;
-        if (_isMuted) return;
 
         // Parse big-endian header
         int freqId = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(0));
-        // uint seq = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4)); // available if needed
+
+        // Look up per-frequency audio settings
+        var settings = _freqSettings.GetValueOrDefault(freqId);
+        if (settings is { Muted: true }) return;
+
+        float vol = settings?.Volume ?? 1.0f;
+        float pan = settings?.Pan ?? 0.5f;
 
         int opusLen = length - 8;
         var opusData = new byte[opusLen];
@@ -482,7 +512,7 @@ public sealed class VoiceService : IDisposable
             var decoded = _opusDecoder.Decode(opusData, 0, opusLen, pcm, 0, OpusFrameSamples, false);
             if (decoded > 0)
             {
-                PlayPcm(pcm, decoded);
+                PlayPcmStereo(pcm, decoded, vol, pan);
             }
         }
         catch
@@ -503,9 +533,9 @@ public sealed class VoiceService : IDisposable
             _waveOut?.Dispose();
             _waveProvider?.ClearBuffer();
 
-            _waveProvider = new BufferedWaveProvider(new WaveFormat(OpusSampleRate, 16, OpusChannels))
+            _waveProvider = new BufferedWaveProvider(new WaveFormat(OpusSampleRate, 16, 2)) // stereo output
             {
-                BufferLength = OpusSampleRate * 2 * 2, // 2 seconds buffer
+                BufferLength = OpusSampleRate * 2 * 2 * 2, // 2 seconds stereo buffer
                 DiscardOnBufferOverflow = true
             };
 
@@ -531,26 +561,28 @@ public sealed class VoiceService : IDisposable
         }
     }
 
-    private void PlayPcm(short[] samples, int count)
+    private void PlayPcmStereo(short[] monoSamples, int count, float volume, float pan)
     {
         if (_waveProvider == null) return;
 
-        // Apply volume
-        var vol = _volume;
-        if (vol < 1.0f)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                samples[i] = (short)(samples[i] * vol);
-            }
-        }
+        // Calculate stereo gains from pan (0=left, 0.5=center, 1=right)
+        float leftGain = Math.Min(1.0f, 2.0f * (1.0f - pan)) * volume;
+        float rightGain = Math.Min(1.0f, 2.0f * pan) * volume;
 
-        var bytes = new byte[count * 2];
-        Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
+        // Interleave left/right channels
+        var stereoBytes = new byte[count * 4]; // 2 channels x 2 bytes per sample
+        for (int i = 0; i < count; i++)
+        {
+            var sample = monoSamples[i];
+            var left = (short)Math.Clamp(sample * leftGain, short.MinValue, short.MaxValue);
+            var right = (short)Math.Clamp(sample * rightGain, short.MinValue, short.MaxValue);
+            BitConverter.GetBytes(left).CopyTo(stereoBytes, i * 4);
+            BitConverter.GetBytes(right).CopyTo(stereoBytes, i * 4 + 2);
+        }
 
         lock (_playbackLock)
         {
-            _waveProvider?.AddSamples(bytes, 0, bytes.Length);
+            _waveProvider?.AddSamples(stereoBytes, 0, stereoBytes.Length);
         }
     }
 

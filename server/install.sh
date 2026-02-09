@@ -637,13 +637,29 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
     if (!freqSubscribers.has(freqId)) freqSubscribers.set(freqId, new Set());
     freqSubscribers.get(freqId).add(sessionToken);
 
+    // Persist to freq_listeners DB
+    db.prepare(
+      'INSERT OR REPLACE INTO freq_listeners (discord_user_id, freq_id, radio_slot, connected_at_ms) VALUES (?,?,?,?)'
+    ).run(session.discordUserId, freqId, 0, Date.now());
+
     console.log('[voice] Join freq', freqId, 'by', session.discordUserId);
+
+    const listenerCount = freqSubscribers.get(freqId).size;
 
     session.ws.send(JSON.stringify({
       type: 'join_ok',
       freqId,
-      listenerCount: freqSubscribers.get(freqId).size,
+      listenerCount,
     }));
+
+    // Notify other subscribers about updated listener count
+    for (const subToken of freqSubscribers.get(freqId)) {
+      if (subToken === sessionToken) continue;
+      const sub = sessions.get(subToken);
+      if (sub && sub.ws && sub.ws.readyState === 1) {
+        sub.ws.send(JSON.stringify({ type: 'listener_update', freqId, listenerCount }));
+      }
+    }
   }
 
   function handleLeave(sessionToken, msg) {
@@ -659,26 +675,55 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
       if (subs.size === 0) freqSubscribers.delete(freqId);
     }
 
+    // Remove from freq_listeners DB
+    db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ? AND freq_id = ?').run(session.discordUserId, freqId);
+
     console.log('[voice] Leave freq', freqId, 'by', session.discordUserId);
 
     session.ws.send(JSON.stringify({
       type: 'leave_ok',
       freqId,
     }));
+
+    // Notify remaining subscribers about updated listener count
+    const remainingSubs = freqSubscribers.get(freqId);
+    if (remainingSubs) {
+      const listenerCount = remainingSubs.size;
+      for (const subToken of remainingSubs) {
+        const sub = sessions.get(subToken);
+        if (sub && sub.ws && sub.ws.readyState === 1) {
+          sub.ws.send(JSON.stringify({ type: 'listener_update', freqId, listenerCount }));
+        }
+      }
+    }
   }
 
   function cleanupSession(token) {
     const session = sessions.get(token);
     if (!session) return;
 
-    // Remove from all frequency subscriptions
+    // Remove from all frequency subscriptions and notify remaining subscribers
     for (const freqId of session.frequencies) {
       const subs = freqSubscribers.get(freqId);
       if (subs) {
         subs.delete(token);
-        if (subs.size === 0) freqSubscribers.delete(freqId);
+        // Notify remaining subscribers about updated listener count
+        if (subs.size > 0) {
+          const listenerCount = subs.size;
+          for (const subToken of subs) {
+            const sub = sessions.get(subToken);
+            if (sub && sub.ws && sub.ws.readyState === 1) {
+              sub.ws.send(JSON.stringify({ type: 'listener_update', freqId, listenerCount }));
+            }
+          }
+        } else {
+          freqSubscribers.delete(freqId);
+        }
       }
     }
+
+    // Remove all freq_listeners for this user
+    db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ?').run(session.discordUserId);
 
     // Remove DB session
     db.prepare('DELETE FROM voice_sessions WHERE session_token = ?').run(token);

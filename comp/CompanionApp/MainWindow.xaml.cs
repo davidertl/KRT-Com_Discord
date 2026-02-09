@@ -60,30 +60,72 @@ public partial class MainWindow : Window
     }
 
     // Hotkey capture handling
+    private string _originalHotkeyValue = "";
+    private DateTime _lastTabChange = DateTime.MinValue;
+    
+    private void TabControl_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        // Track when tabs change to prevent auto-focus on hotkey fields
+        _lastTabChange = DateTime.Now;
+    }
+
     private void HotkeyTextBox_GotFocus(object sender, RoutedEventArgs e)
     {
         if (sender is TextBox tb)
         {
+            // Don't auto-capture if tab just changed (within 100ms)
+            if ((DateTime.Now - _lastTabChange).TotalMilliseconds < 100)
+            {
+                // Tab navigation, not user click - clear focus
+                Keyboard.ClearFocus();
+                return;
+            }
+            
+            // Also check if user clicked on the textbox
+            if (!tb.IsMouseOver)
+            {
+                // Likely keyboard navigation, don't capture
+                Keyboard.ClearFocus();
+                return;
+            }
+
             _activeHotkeyBox = tb;
-            tb.Text = "Press a key...";
+            
+            // Store original value for cancel
+            if (tb.Tag is RadioPanelViewModel radio)
+            {
+                _originalHotkeyValue = radio.Hotkey;
+            }
+            else if (tb.Name == "TalkToAllHotkeyBox")
+            {
+                _originalHotkeyValue = _vm.TalkToAllHotkey;
+            }
+            else if (tb.Name == "PttMuteAllHotkeyBox")
+            {
+                _originalHotkeyValue = _vm.PttMuteAllHotkey;
+            }
+            else if (tb.Name == "ToggleMuteAllHotkeyBox")
+            {
+                _originalHotkeyValue = _vm.ToggleMuteAllHotkey;
+            }
+            else
+            {
+                _originalHotkeyValue = "";
+            }
+            
+            tb.Text = "Press a key... (ESC to cancel)";
         }
     }
 
     private void HotkeyTextBox_LostFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TextBox tb && tb.Text == "Press a key...")
+        if (sender is TextBox tb && tb.Text.StartsWith("Press a key"))
         {
             // Restore original value if nothing was pressed
-            if (tb.Tag is RadioPanelViewModel radio)
-            {
-                tb.Text = radio.Hotkey;
-            }
-            else
-            {
-                tb.Text = "";
-            }
+            tb.Text = _originalHotkeyValue;
         }
         _activeHotkeyBox = null;
+        _originalHotkeyValue = "";
     }
 
     private void HotkeyTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -94,6 +136,14 @@ public partial class MainWindow : Window
 
         // Get the actual key (handle system keys)
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
+
+        // ESC cancels the assignment
+        if (key == Key.Escape)
+        {
+            tb.Text = _originalHotkeyValue;
+            Keyboard.ClearFocus();
+            return;
+        }
 
         // Ignore modifier-only keys
         if (key == Key.LeftShift || key == Key.RightShift ||
@@ -119,10 +169,70 @@ public partial class MainWindow : Window
 
         var hotkey = string.Join("+", hotkeyParts);
 
-        // Update the bound radio panel
+        // Determine the source name for conflict checking
+        string sourceName = "";
         if (tb.Tag is RadioPanelViewModel radio)
         {
-            radio.Hotkey = hotkey;
+            sourceName = radio.Label;
+        }
+        else if (tb.Name == "TalkToAllHotkeyBox")
+        {
+            sourceName = "Talk To All";
+        }
+        else if (tb.Name == "PttMuteAllHotkeyBox")
+        {
+            sourceName = "PTM All Radio";
+        }
+        else if (tb.Name == "ToggleMuteAllHotkeyBox")
+        {
+            sourceName = "TTM All Radio";
+        }
+
+        // Check for conflicts
+        var conflict = _vm.GetHotkeyConflict(hotkey, sourceName);
+        if (conflict != null)
+        {
+            var result = MessageBox.Show(
+                $"The hotkey '{hotkey}' is already used by '{conflict}'.\n\nDo you want to reassign it to this function?",
+                "Hotkey Conflict",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+
+            if (result == MessageBoxResult.No)
+            {
+                // Restore original value
+                if (tb.Tag is RadioPanelViewModel radioRestore)
+                {
+                    tb.Text = radioRestore.Hotkey;
+                }
+                else
+                {
+                    tb.Text = "";
+                }
+                Keyboard.ClearFocus();
+                return;
+            }
+
+            // Clear the hotkey from the conflicting function
+            _vm.ClearHotkeyFromAll(hotkey);
+        }
+
+        // Update the bound radio panel or global hotkey
+        if (tb.Tag is RadioPanelViewModel radioPanel)
+        {
+            radioPanel.Hotkey = hotkey;
+        }
+        else if (tb.Name == "TalkToAllHotkeyBox")
+        {
+            _vm.TalkToAllHotkey = hotkey;
+        }
+        else if (tb.Name == "PttMuteAllHotkeyBox")
+        {
+            _vm.PttMuteAllHotkey = hotkey;
+        }
+        else if (tb.Name == "ToggleMuteAllHotkeyBox")
+        {
+            _vm.ToggleMuteAllHotkey = hotkey;
         }
         
         tb.Text = hotkey;
@@ -151,5 +261,10 @@ public partial class MainWindow : Window
     private void ClearPttMuteAllHotkey_Click(object sender, RoutedEventArgs e)
     {
         _vm.PttMuteAllHotkey = "";
+    }
+
+    private void ClearToggleMuteAllHotkey_Click(object sender, RoutedEventArgs e)
+    {
+        _vm.ToggleMuteAllHotkey = "";
     }
 }

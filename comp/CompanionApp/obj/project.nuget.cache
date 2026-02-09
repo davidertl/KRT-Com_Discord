@@ -1,9 +1,10 @@
 {
   "version": 2,
-  "dgSpecHash": "nPVpOs7/ffM=",
+  "dgSpecHash": "FDXljWQIK5A=",
   "success": true,
   "projectFilePath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
   "expectedPackageFiles": [
+    "C:\\Users\\micro\\.nuget\\packages\\bouncycastle.cryptography\\2.4.0\\bouncycastle.cryptography.2.4.0.nupkg.sha512",
     "C:\\Users\\micro\\.nuget\\packages\\concentus\\1.1.7\\concentus.1.1.7.nupkg.sha512",
     "C:\\Users\\micro\\.nuget\\packages\\google.protobuf\\3.25.1\\google.protobuf.3.25.1.nupkg.sha512",
     "C:\\Users\\micro\\.nuget\\packages\\microsoft.netcore.platforms\\1.0.1\\microsoft.netcore.platforms.1.0.1.nupkg.sha512",
@@ -16,5 +17,18 @@
     "C:\\Users\\micro\\.nuget\\packages\\naudio.winmm\\2.2.1\\naudio.winmm.2.2.1.nupkg.sha512",
     "C:\\Users\\micro\\.nuget\\packages\\netstandard.library\\1.6.0\\netstandard.library.1.6.0.nupkg.sha512"
   ],
-  "logs": []
+  "logs": [
+    {
+      "code": "NU1603",
+      "level": "Warning",
+      "message": "CompanionApp hängt von BouncyCastle.Cryptography (>= 2.3.2) ab, aber BouncyCastle.Cryptography 2.3.2 wurde nicht gefunden. BouncyCastle.Cryptography 2.4.0 wurde stattdessen aufgelöst.",
+      "projectPath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
+      "warningLevel": 1,
+      "filePath": "C:\\Users\\micro\\OneDrive\\Dokumente\\GitHub\\KRT-Com_Discord\\comp\\CompanionApp\\CompanionApp.csproj",
+      "libraryId": "BouncyCastle.Cryptography",
+      "targetGraphs": [
+        "net10.0-windows7.0"
+      ]
+    }
+  ]
 }

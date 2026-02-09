@@ -2,6 +2,19 @@
   "version": 3,
   "targets": {
     "net10.0-windows7.0": {
+      "BouncyCastle.Cryptography/2.4.0": {
+        "type": "package",
+        "compile": {
+          "lib/net6.0/BouncyCastle.Cryptography.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net6.0/BouncyCastle.Cryptography.dll": {
+            "related": ".xml"
+          }
+        }
+      },
       "Concentus/1.1.7": {
         "type": "package",
         "dependencies": {
@@ -166,6 +179,26 @@
     }
   },
   "libraries": {
+    "BouncyCastle.Cryptography/2.4.0": {
+      "sha512": "SwXsAV3sMvAU/Nn31pbjhWurYSjJ+/giI/0n6tCrYoupEK34iIHCuk3STAd9fx8yudM85KkLSVdn951vTng/vQ==",
+      "type": "package",
+      "path": "bouncycastle.cryptography/2.4.0",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "LICENSE.md",
+        "README.md",
+        "bouncycastle.cryptography.2.4.0.nupkg.sha512",
+        "bouncycastle.cryptography.nuspec",
+        "lib/net461/BouncyCastle.Cryptography.dll",
+        "lib/net461/BouncyCastle.Cryptography.xml",
+        "lib/net6.0/BouncyCastle.Cryptography.dll",
+        "lib/net6.0/BouncyCastle.Cryptography.xml",
+        "lib/netstandard2.0/BouncyCastle.Cryptography.dll",
+        "lib/netstandard2.0/BouncyCastle.Cryptography.xml",
+        "packageIcon.png"
+      ]
+    },
     "Concentus/1.1.7": {
       "sha512": "cfVhAuVDkResrGXMC9eAFh5OlGuFhU0wohzGKpQw+sWdhVjSBuS+BVTmk7JnxcJq+ErESz6OErzL0cS2lqtAlA==",
       "type": "package",
@@ -348,6 +381,7 @@
   },
   "projectFileDependencyGroups": {
     "net10.0-windows7.0": [
+      "BouncyCastle.Cryptography >= 2.3.2",
       "Concentus >= 1.1.7",
       "Google.Protobuf >= 3.25.1",
       "NAudio >= 2.2.1",
@@ -397,6 +431,10 @@
       "net10.0-windows7.0": {
         "targetAlias": "net10.0-windows",
         "dependencies": {
+          "BouncyCastle.Cryptography": {
+            "target": "Package",
+            "version": "[2.3.2, )"
+          },
           "Concentus": {
             "target": "Package",
             "version": "[1.1.7, )"
@@ -726,5 +764,17 @@
         }
       }
     }
-  }
+  },
+  "logs": [
+    {
+      "code": "NU1603",
+      "level": "Warning",
+      "warningLevel": 1,
+      "message": "CompanionApp hängt von BouncyCastle.Cryptography (>= 2.3.2) ab, aber BouncyCastle.Cryptography 2.3.2 wurde nicht gefunden. BouncyCastle.Cryptography 2.4.0 wurde stattdessen aufgelöst.",
+      "libraryId": "BouncyCastle.Cryptography",
+      "targetGraphs": [
+        "net10.0-windows7.0"
+      ]
+    }
+  ]
 }

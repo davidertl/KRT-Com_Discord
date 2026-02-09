@@ -10,11 +10,18 @@ public class CompanionConfig
     public int RadioSlot { get; set; } = 1;
     public int SampleRate { get; set; } = 48000;
 
+    public string GuildId { get; set; } = "";
+
     // Mumble server settings
     public string MumbleHost { get; set; } = "127.0.0.1";
     public int MumblePort { get; set; } = 64738;
     public string MumbleUsername { get; set; } = "";
     public string MumblePassword { get; set; } = "";
+
+    // App settings
+    public bool AutoConnect { get; set; } = true;
+    public bool DeactivateRadiosOnAutoConnect { get; set; } = false;
+    public bool DebugLoggingEnabled { get; set; } = false;
 
     public List<HotkeyBinding> Bindings { get; set; } = new()
     {

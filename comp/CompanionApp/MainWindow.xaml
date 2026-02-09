@@ -186,7 +186,8 @@
     </Border>
 
     <!-- Main Tab Control -->
-    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" Padding="0">
+    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" Padding="0"
+                SelectionChanged="TabControl_SelectionChanged">
       
       <!-- Radio Tab -->
       <TabItem Header="Radio">
@@ -205,14 +206,19 @@
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
 
+                  <!-- Mute Checkbox -->
+                  <CheckBox Grid.Column="0" IsChecked="{Binding EmergencyRadio.IsMuted}" VerticalAlignment="Center" 
+                            Margin="0,0,8,0" ToolTip="Mute this radio"/>
+
                   <!-- Status Arrows -->
-                  <StackPanel Grid.Column="0" VerticalAlignment="Center" Width="30" Margin="0,0,12,0">
+                  <StackPanel Grid.Column="1" VerticalAlignment="Center" Width="30" Margin="0,0,12,0">
                     <TextBlock Text="▲" FontSize="16" Foreground="{Binding EmergencyRadio.StatusUpColor}" 
                                Visibility="{Binding EmergencyRadio.StatusArrowUp}" HorizontalAlignment="Center"/>
                     <TextBlock Text="▼" FontSize="16" Foreground="{Binding EmergencyRadio.StatusDownColor}" 
@@ -220,7 +226,7 @@
                   </StackPanel>
 
                   <!-- Label and Frequency -->
-                  <StackPanel Grid.Column="1">
+                  <StackPanel Grid.Column="2">
                     <TextBlock Text="EMERGENCY" FontWeight="Bold" FontSize="14" 
                                Foreground="{StaticResource EmergencyBorder}" Margin="0,0,0,6"/>
                     <Border Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
@@ -230,32 +236,30 @@
                   </StackPanel>
 
                   <!-- Listener Count -->
-                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="20,0">
+                  <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="20,0">
                     <TextBlock Text="Listeners" FontSize="10" Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
                     <TextBlock Text="{Binding EmergencyRadio.ListenerCount}" FontSize="18" FontWeight="Bold" 
                                Foreground="{StaticResource TextPrimary}" HorizontalAlignment="Center"/>
                   </StackPanel>
 
                   <!-- Volume -->
-                  <StackPanel Grid.Column="3" VerticalAlignment="Center" Width="120" Margin="10,0">
+                  <StackPanel Grid.Column="4" VerticalAlignment="Center" Width="100" Margin="10,0">
                     <TextBlock Text="Volume" FontSize="10" Foreground="{StaticResource TextSecondary}"/>
                     <Slider Minimum="0" Maximum="100" Value="{Binding EmergencyRadio.Volume}"/>
                   </StackPanel>
 
-                  <!-- Hotkey -->
-                  <StackPanel Grid.Column="4" VerticalAlignment="Center">
+                  <!-- Pan/Balance -->
+                  <StackPanel Grid.Column="5" VerticalAlignment="Center" Width="100" Margin="10,0,0,0">
                     <Grid>
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="25"/>
                       </Grid.ColumnDefinitions>
-                      <TextBox Grid.Column="0" Text="{Binding EmergencyRadio.Hotkey}" Style="{StaticResource HotkeyTextBox}" 
-                               Width="100" PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" 
-                               GotFocus="HotkeyTextBox_GotFocus" LostFocus="HotkeyTextBox_LostFocus"
-                               Tag="{Binding EmergencyRadio}"/>
-                      <Button Grid.Column="1" Style="{StaticResource ClearButton}" Width="24" Height="24" Margin="4,0,0,0"
-                              Command="{Binding EmergencyRadio.ClearHotkeyCommand}"/>
+                      <TextBlock Text="Pan" FontSize="10" Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock Grid.Column="1" Text="{Binding EmergencyRadio.BalanceText}" FontSize="10" 
+                                 Foreground="{StaticResource TextSecondary}" TextAlignment="Right"/>
                     </Grid>
+                    <Slider Minimum="0" Maximum="100" Value="{Binding EmergencyRadio.Balance}"/>
                   </StackPanel>
                 </Grid>
               </Border>
@@ -288,6 +292,7 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                           </Grid.ColumnDefinitions>
 
                           <!-- Status Arrows -->
@@ -299,7 +304,8 @@
                           </StackPanel>
 
                           <!-- Enable Checkbox -->
-                          <CheckBox Grid.Column="1" IsChecked="{Binding IsEnabled}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                          <CheckBox Grid.Column="1" IsChecked="{Binding IsEnabled}" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    ToolTip="Enable this radio"/>
 
                           <!-- Label Input -->
                           <TextBox Grid.Column="2" Text="{Binding Label, UpdateSourceTrigger=PropertyChanged}" 
@@ -312,9 +318,13 @@
                                        VerticalAlignment="Center" Margin="4,0,0,0"/>
                           </StackPanel>
 
+                          <!-- Mute Checkbox -->
+                          <CheckBox Grid.Column="4" IsChecked="{Binding IsMuted}" VerticalAlignment="Center" Margin="8,0,0,0"
+                                    ToolTip="Mute this radio" Content="🔇"/>
+
                           <!-- Broadcast Checkbox (Advanced Mode Only) -->
-                          <CheckBox Grid.Column="4" Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
-                                    ToolTip="Include in Talk To All broadcast"
+                          <CheckBox Grid.Column="5" Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
+                                    ToolTip="Include in Talk To All broadcast" Margin="8,0,0,0"
                                     Visibility="{Binding ShowBroadcastCheckbox, Converter={StaticResource BoolToVis}}"/>
                         </Grid>
 
@@ -415,79 +425,154 @@
       <!-- Keybinds Tab -->
       <TabItem Header="Keybinds">
         <ScrollViewer Margin="20">
-          <StackPanel MaxWidth="600">
-            <TextBlock Text="Click on a hotkey field and press your desired key combination" 
-                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,20"/>
-            
-            <!-- Radio Hotkeys -->
-            <TextBlock Text="Radio PTT Keys" Foreground="{StaticResource TextPrimary}" 
-                       FontSize="16" FontWeight="SemiBold" Margin="0,0,0,12"/>
-            
-            <ItemsControl ItemsSource="{Binding RadioPanels}">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                  <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" 
-                          Margin="0,0,0,6" Padding="12">
-                    <Grid>
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                      </Grid.ColumnDefinitions>
-                      <TextBlock Grid.Column="0" Text="{Binding Label}" 
-                                 Foreground="{StaticResource TextPrimary}" FontWeight="SemiBold"
-                                 VerticalAlignment="Center"/>
-                      <TextBox Grid.Column="1" Text="{Binding Hotkey, UpdateSourceTrigger=PropertyChanged}" 
-                               Style="{StaticResource HotkeyTextBox}"
-                               PreviewKeyDown="HotkeyTextBox_PreviewKeyDown"
-                               GotFocus="HotkeyTextBox_GotFocus"
-                               LostFocus="HotkeyTextBox_LostFocus"
-                               Tag="{Binding}"/>
-                      <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
-                              Command="{Binding ClearHotkeyCommand}"/>
-                    </Grid>
-                  </Border>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="20"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
 
-            <!-- Global Hotkeys -->
-            <TextBlock Text="Global Hotkeys" Foreground="{StaticResource TextPrimary}" 
-                       FontSize="16" FontWeight="SemiBold" Margin="0,30,0,12"/>
-            
-            <!-- Talk to All -->
-            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,0,0,6">
-              <Grid>
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="150"/>
-                  <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Talk To All" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"/>
-                <TextBox Grid.Column="1" Text="{Binding TalkToAllHotkey}" Style="{StaticResource HotkeyTextBox}"
-                         PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" GotFocus="HotkeyTextBox_GotFocus"
-                         LostFocus="HotkeyTextBox_LostFocus"/>
-                <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
-                        Click="ClearTalkToAllHotkey_Click"/>
-              </Grid>
-            </Border>
+            <!-- Left Column: Radio Hotkeys -->
+            <StackPanel Grid.Column="0">
+              <TextBlock Text="Click on a hotkey field and press your desired key combination" 
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,15" FontSize="11" TextWrapping="Wrap"/>
+              
+              <TextBlock Text="Radio PTT Keys" Foreground="{StaticResource TextPrimary}" 
+                         FontSize="16" FontWeight="SemiBold" Margin="0,0,0,12"/>
 
-            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,0,0,6">
-              <Grid>
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="150"/>
-                  <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Push-To-Mute All" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"/>
-                <TextBox Grid.Column="1" Text="{Binding PttMuteAllHotkey}" Style="{StaticResource HotkeyTextBox}"
-                         PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" GotFocus="HotkeyTextBox_GotFocus"
-                         LostFocus="HotkeyTextBox_LostFocus"/>
-                <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
-                        Click="ClearPttMuteAllHotkey_Click"/>
-              </Grid>
-            </Border>
-          </StackPanel>
+              <!-- Emergency Radio Keybind -->
+              <Border Background="#2A1515" CornerRadius="6" BorderThickness="1" BorderBrush="{StaticResource EmergencyBorder}"
+                      Margin="0,0,0,6" Padding="12" Visibility="{Binding EmergencyRadioVisibility}">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="Emergency" Foreground="{StaticResource EmergencyBorder}" 
+                             FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <TextBox Grid.Column="1" Text="{Binding EmergencyRadio.Hotkey, UpdateSourceTrigger=PropertyChanged}" 
+                           Style="{StaticResource HotkeyTextBox}" PreviewKeyDown="HotkeyTextBox_PreviewKeyDown"
+                           GotFocus="HotkeyTextBox_GotFocus" LostFocus="HotkeyTextBox_LostFocus"
+                           Tag="{Binding EmergencyRadio}"/>
+                  <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
+                          Command="{Binding EmergencyRadio.ClearHotkeyCommand}"/>
+                </Grid>
+              </Border>
+              
+              <!-- Regular Radio Keybinds -->
+              <ItemsControl ItemsSource="{Binding RadioPanels}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" 
+                            Margin="0,0,0,6" Padding="12" Visibility="{Binding IsVisible}">
+                      <Grid>
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="100"/>
+                          <ColumnDefinition Width="*"/>
+                          <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding Label}" 
+                                   Foreground="{StaticResource TextPrimary}" FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <TextBox Grid.Column="1" Text="{Binding Hotkey, UpdateSourceTrigger=PropertyChanged}" 
+                                 Style="{StaticResource HotkeyTextBox}"
+                                 PreviewKeyDown="HotkeyTextBox_PreviewKeyDown"
+                                 GotFocus="HotkeyTextBox_GotFocus"
+                                 LostFocus="HotkeyTextBox_LostFocus"
+                                 Tag="{Binding}"/>
+                        <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
+                                Command="{Binding ClearHotkeyCommand}"/>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+
+            <!-- Right Column: Global Hotkeys -->
+            <StackPanel Grid.Column="2">
+              <TextBlock Text=" " 
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,15" FontSize="11"/>
+              
+              <TextBlock Text="Global Hotkeys" Foreground="{StaticResource TextPrimary}" 
+                         FontSize="16" FontWeight="SemiBold" Margin="0,0,0,12"/>
+              
+              <!-- Talk to All (Advanced Mode Only) -->
+              <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,0,0,6"
+                      Visibility="{Binding AdvancedMode, Converter={StaticResource BoolToVis}}">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Talk To All" Foreground="{StaticResource AccentBlue}" VerticalAlignment="Center"
+                             ToolTip="Broadcast to all radios with the broadcast checkbox enabled"/>
+                  <TextBox x:Name="TalkToAllHotkeyBox" Grid.Column="1" Text="{Binding TalkToAllHotkey}" Style="{StaticResource HotkeyTextBox}"
+                           PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" GotFocus="HotkeyTextBox_GotFocus"
+                           LostFocus="HotkeyTextBox_LostFocus"/>
+                  <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
+                          Click="ClearTalkToAllHotkey_Click"/>
+                </Grid>
+              </Border>
+
+              <!-- PTM All Radio -->
+              <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,0,0,6">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="PTM All Radio" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                             ToolTip="Push-to-Mute: All radios will be muted while this key is pressed"/>
+                  <TextBox x:Name="PttMuteAllHotkeyBox" Grid.Column="1" Text="{Binding PttMuteAllHotkey}" Style="{StaticResource HotkeyTextBox}"
+                           PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" GotFocus="HotkeyTextBox_GotFocus"
+                           LostFocus="HotkeyTextBox_LostFocus"/>
+                  <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
+                          Click="ClearPttMuteAllHotkey_Click"/>
+                </Grid>
+              </Border>
+
+              <!-- TTM All Radio -->
+              <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,0,0,6">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="TTM All Radio" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"
+                             ToolTip="Toggle-to-Mute: All radios will be muted until you press this key again"/>
+                  <TextBox x:Name="ToggleMuteAllHotkeyBox" Grid.Column="1" Text="{Binding ToggleMuteAllHotkey}" Style="{StaticResource HotkeyTextBox}"
+                           PreviewKeyDown="HotkeyTextBox_PreviewKeyDown" GotFocus="HotkeyTextBox_GotFocus"
+                           LostFocus="HotkeyTextBox_LostFocus"/>
+                  <Button Grid.Column="2" Style="{StaticResource ClearButton}" Width="28" Height="28" Margin="8,0,0,0"
+                          Click="ClearToggleMuteAllHotkey_Click"/>
+                </Grid>
+              </Border>
+
+              <!-- Mute Status Indicator -->
+              <Border Background="{StaticResource BackgroundMedium}" CornerRadius="6" Padding="12" Margin="0,20,0,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="All Radios Muted:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                  <Ellipse Width="12" Height="12" Margin="10,0,0,0" VerticalAlignment="Center">
+                    <Ellipse.Style>
+                      <Style TargetType="Ellipse">
+                        <Setter Property="Fill" Value="{StaticResource BackgroundLight}"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding AllRadiosMuted}" Value="True">
+                            <Setter Property="Fill" Value="{StaticResource AccentRed}"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Ellipse.Style>
+                  </Ellipse>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Grid>
         </ScrollViewer>
       </TabItem>
 
@@ -510,6 +595,11 @@
                           IsChecked="{Binding PlayPttBeep}" Margin="0,0,0,10"/>
                 <CheckBox Content="Auto-connect on launch" Foreground="{StaticResource TextSecondary}" 
                           IsChecked="{Binding AutoConnect}" Margin="0,0,0,10"/>
+                <CheckBox Content="Enable debug logging" Foreground="{StaticResource TextSecondary}"
+                          IsChecked="{Binding DebugLoggingEnabled}" Margin="0,0,0,6"/>
+                <TextBlock Text="Log file:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                <TextBlock Text="{Binding DebugLogFilePath}" Foreground="{StaticResource TextSecondary}" 
+                           FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
                 <CheckBox Content="    Deactivate all radios except Emergency" Foreground="{StaticResource TextSecondary}" 
                           IsChecked="{Binding DeactivateRadiosOnAutoConnect}" Margin="20,0,0,10"
                           IsEnabled="{Binding AutoConnect}"/>
@@ -548,22 +638,7 @@
             <TextBlock Text="Server Connection" Foreground="{StaticResource TextPrimary}" 
                        FontSize="18" FontWeight="SemiBold" Margin="0,0,0,20"/>
 
-            <!-- Discord Integration -->
-            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
-              <StackPanel>
-                <TextBlock Text="Discord Integration" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,15"/>
-                
-                <Button Content="Login with Discord" Style="{StaticResource ModernButton}" 
-                        HorizontalAlignment="Left" Margin="0,0,0,15" IsEnabled="False"
-                        ToolTip="Coming soon - Discord OAuth login"/>
-                
-                <TextBlock Text="OR enter User ID manually:" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                <TextBox Text="{Binding DiscordUserId, UpdateSourceTrigger=PropertyChanged}" 
-                         Style="{StaticResource ModernTextBox}"/>
-              </StackPanel>
-            </Border>
-
-            <!-- Mumble Server -->
+            <!-- Mumble Server with Discord Auth -->
             <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
               <StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
@@ -584,7 +659,7 @@
                              VerticalAlignment="Center"/>
                 </StackPanel>
                 
-                <Grid Margin="0,0,0,10">
+                <Grid Margin="0,0,0,15">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="100"/>
@@ -601,14 +676,24 @@
                   </StackPanel>
                 </Grid>
 
-                <TextBlock Text="Username (optional)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                <TextBox Text="{Binding MumbleUsername, UpdateSourceTrigger=PropertyChanged}" 
-                         Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
+                <!-- Discord Authentication -->
+                <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,15">
+                  <StackPanel>
+                    <TextBlock Text="Authentication" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    
+                    <Button Content="Login with Discord" Style="{StaticResource ModernButton}" 
+                            HorizontalAlignment="Left" Margin="0,0,0,12" IsEnabled="False"
+                            ToolTip="Coming soon - Discord OAuth login"/>
+                    
+                    <TextBlock Text="Discord User ID:" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
+                    <TextBox Text="{Binding DiscordUserId, UpdateSourceTrigger=PropertyChanged}" 
+                             Style="{StaticResource ModernTextBox}" Margin="0,0,0,10"/>
 
-                <TextBlock Text="Password (optional)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
-                <PasswordBox x:Name="MumblePasswordBox" Background="{StaticResource BackgroundLight}"
-                             Foreground="{StaticResource TextPrimary}" BorderThickness="0" Padding="8,6"
-                             PasswordChanged="MumblePasswordBox_PasswordChanged" Margin="0,0,0,15"/>
+                    <TextBlock Text="Guild ID (Discord Server):" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
+                    <TextBox Text="{Binding GuildId, UpdateSourceTrigger=PropertyChanged}" 
+                             Style="{StaticResource ModernTextBox}"/>
+                  </StackPanel>
+                </Border>
 
                 <Button Content="{Binding MumbleConnectButtonText}" Style="{StaticResource ModernButton}" 
                         Click="MumbleConnect_Click" HorizontalAlignment="Left"/>
@@ -669,13 +754,13 @@
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <TextBlock Text="Streaming:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <Ellipse Width="10" Height="10" Margin="0,0,20,0" VerticalAlignment="Center">
+          <Ellipse x:Name="StreamingIndicatorEllipse" Width="10" Height="10" Margin="0,0,20,0" VerticalAlignment="Center"
+                   Fill="{Binding StreamingIndicatorColor}">
             <Ellipse.Style>
               <Style TargetType="Ellipse">
-                <Setter Property="Fill" Value="{StaticResource BackgroundLight}"/>
                 <Style.Triggers>
-                  <DataTrigger Binding="{Binding IsStreaming}" Value="True">
-                    <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
+                  <DataTrigger Binding="{Binding IsStreaming}" Value="False">
+                    <Setter Property="Fill" Value="{StaticResource BackgroundLight}"/>
                   </DataTrigger>
                 </Style.Triggers>
               </Style>

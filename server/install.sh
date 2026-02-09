@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.2
+##version alpha-0.0.3
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -151,6 +151,12 @@ else
   log_ok "Ice API bereits konfiguriert"
 fi
 
+# Ensure icesecretwrite is empty so authenticator can connect via Ice
+if [ -f "$MUMBLE_CONFIG" ] && ! grep -q '^icesecretwrite=' "$MUMBLE_CONFIG"; then
+  echo 'icesecretwrite=' >> "$MUMBLE_CONFIG"
+  log_ok "icesecretwrite (leer) ergänzt für Authenticator"
+fi
+
 systemctl restart mumble-server >/dev/null 2>&1 || true
 log_ok "Mumble Server neu gestartet"
 
@@ -161,6 +167,457 @@ log_info "[7/10] Installiere Node.js ${NODE_VERSION}"
 curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
 apt -y install nodejs
 log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
+
+# --------------------------------------------------
+# Mumble Authenticator (Python + zeroc-ice)
+# --------------------------------------------------
+log_info "[7b/10] Installiere Mumble Authenticator Abhängigkeiten"
+apt -y install python3 python3-pip python3-venv >/dev/null 2>&1 || true
+
+MUMBLE_AUTH_DIR="$APP_ROOT/mumble-auth"
+MUMBLE_AUTH_VENV="$MUMBLE_AUTH_DIR/venv"
+mkdir -p "$MUMBLE_AUTH_DIR"
+
+if [ ! -d "$MUMBLE_AUTH_VENV" ]; then
+  python3 -m venv "$MUMBLE_AUTH_VENV"
+  log_ok "Python venv erstellt: $MUMBLE_AUTH_VENV"
+else
+  log_ok "Python venv existiert bereits"
+fi
+
+"$MUMBLE_AUTH_VENV/bin/pip" install --quiet zeroc-ice requests >/dev/null 2>&1 || true
+log_ok "zeroc-ice + requests installiert"
+
+# Write the authenticator script
+write_file_backup "$MUMBLE_AUTH_DIR/mumble-auth.py" "$(cat <<'PYEOF'
+#!/usr/bin/env python3
+\"\"\"
+Mumble Ice Authenticator for das-krt.
+Validates users against the das-krt backend:
+  username = discord_user_id
+  password = guild_id
+
+If the backend confirms the user is a member of the guild,
+the user is allowed in and assigned to the 'discord' group
+so that Mumble ACLs can grant channel create/join rights.
+\"\"\"
+
+import os
+import sys
+import json
+import time
+import logging
+import requests
+import Ice
+
+# Load Murmur Ice interface definition
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ICE_FILE = os.path.join(SCRIPT_DIR, 'Murmur.ice')
+if not os.path.exists(ICE_FILE):
+    # Try system locations
+    for p in ['/usr/share/slice/Murmur.ice', '/usr/share/mumble-server/Murmur.ice', '/usr/share/mumble/Murmur.ice']:
+        if os.path.exists(p):
+            ICE_FILE = p
+            break
+
+Ice.loadSlice(ICE_FILE)
+import Murmur
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [mumble-auth] %(levelname)s %(message)s',
+)
+log = logging.getLogger('mumble-auth')
+
+BACKEND_URL = os.environ.get('MUMBLE_AUTH_BACKEND', 'http://127.0.0.1:3000')
+ICE_HOST = os.environ.get('MUMBLE_ICE_HOST', '127.0.0.1')
+ICE_PORT = os.environ.get('MUMBLE_ICE_PORT', '6502')
+
+# Texture and comment are not used
+FALLBACK = -2  # -2 = let Mumble handle it (fall through to default auth)
+AUTH_REFUSED = -1  # reject
+
+
+class KrtAuthenticator(Murmur.ServerAuthenticator):
+    \"\"\"Ice authenticator callback object.\"\"\"
+
+    def __init__(self, server):
+        self.server = server
+
+    def authenticate(self, name, pw, certificates, certhash, certstrong, current=None):
+        \"\"\"
+        Called by Mumble for every login attempt.
+        Returns (userId, displayName, groups).
+          userId >= 0  -> authenticated (Mumble will auto-register if needed)
+          userId == -1 -> authentication refused
+          userId == -2 -> fall through to default Mumble auth
+        \"\"\"
+        # Let SuperUser through to default auth
+        if name == 'SuperUser':
+            log.info('SuperUser login -> fall through to default auth')
+            return (FALLBACK, name, [])
+
+        # Skip empty credentials
+        if not name or not pw:
+            log.info(f'Empty credentials for "{name}" -> refused')
+            return (AUTH_REFUSED, name, [])
+
+        try:
+            resp = requests.post(
+                f'{BACKEND_URL}/mumble/auth',
+                json={'username': name, 'password': pw},
+                timeout=5,
+            )
+            data = resp.json()
+        except Exception as e:
+            log.error(f'Backend request failed: {e}')
+            # On backend error, fall through to let Mumble handle it
+            return (FALLBACK, name, [])
+
+        if data.get('ok'):
+            display_name = data.get('displayName', name)
+            groups = data.get('groups', [])
+            # Use a stable numeric ID derived from discord_user_id
+            # Mumble needs a positive int; we hash the string
+            user_id = abs(hash(name)) % (2**30)
+            if user_id == 0:
+                user_id = 1  # 0 is reserved for SuperUser
+
+            log.info(f'AUTH OK: {name} -> uid={user_id} display="{display_name}" groups={groups}')
+            return (user_id, display_name, groups)
+        else:
+            reason = data.get('reason', 'unknown')
+            log.info(f'AUTH DENIED: {name} reason={reason}')
+            return (AUTH_REFUSED, name, [])
+
+    def getInfo(self, id, current=None):
+        \"\"\"Return user info. Not implemented - let Mumble handle it.\"\"\"
+        return (False, {})
+
+    def nameToId(self, name, current=None):
+        \"\"\"Map name to user ID. Return -2 to fall through.\"\"\"
+        return FALLBACK
+
+    def idToName(self, id, current=None):
+        \"\"\"Map user ID to name. Return empty to fall through.\"\"\"
+        return ''
+
+    def idToTexture(self, id, current=None):
+        \"\"\"Return user texture/avatar. Not implemented.\"\"\"
+        return bytes()
+
+
+def main():
+    log.info(f'Starting Mumble authenticator (backend={BACKEND_URL}, ice={ICE_HOST}:{ICE_PORT})')
+
+    # Initialize Ice
+    props = Ice.createProperties()
+    props.setProperty('Ice.ImplicitContext', 'Shared')
+    props.setProperty('Ice.MessageSizeMax', '65536')
+
+    init_data = Ice.InitializationData()
+    init_data.properties = props
+
+    ice = Ice.initialize(init_data)
+
+    try:
+        # Connect to Murmur Ice endpoint
+        proxy_str = f'Meta:tcp -h {ICE_HOST} -p {ICE_PORT}'
+        base = ice.stringToProxy(proxy_str)
+        meta = Murmur.MetaPrx.checkedCast(base)
+        if not meta:
+            log.error('Could not connect to Murmur Ice interface')
+            sys.exit(1)
+
+        # Get default virtual server (id=1)
+        servers = meta.getBootedServers()
+        if not servers:
+            log.error('No booted Mumble servers found')
+            sys.exit(1)
+
+        server = servers[0]
+        log.info(f'Connected to Mumble server id={server.id()}')
+
+        # Create authenticator adapter
+        adapter = ice.createObjectAdapterWithEndpoints(
+            'Authenticator', 'tcp -h 127.0.0.1'
+        )
+        auth = KrtAuthenticator(server)
+        auth_proxy = adapter.addWithUUID(auth)
+        adapter.activate()
+
+        # Register authenticator with the server
+        server.setAuthenticator(Murmur.ServerAuthenticatorPrx.uncheckedCast(auth_proxy))
+        log.info('Authenticator registered with Mumble server')
+
+        # Keep running
+        ice.waitForShutdown()
+    except KeyboardInterrupt:
+        log.info('Shutting down')
+    except Exception as e:
+        log.error(f'Fatal error: {e}', exc_info=True)
+    finally:
+        ice.destroy()
+
+
+if __name__ == '__main__':
+    main()
+PYEOF
+)"
+
+# The authenticator needs the Murmur Ice stubs (Murmur.ice -> Murmur.py)
+# We generate them from the Murmur.ice file that ships with mumble-server
+MURMUR_ICE_FILE="/usr/share/slice/Murmur.ice"
+if [ ! -f "$MURMUR_ICE_FILE" ]; then
+  # Try alternative locations
+  MURMUR_ICE_FILE="/usr/share/mumble-server/Murmur.ice"
+fi
+if [ ! -f "$MURMUR_ICE_FILE" ]; then
+  MURMUR_ICE_FILE="/usr/share/mumble/Murmur.ice"
+fi
+
+if [ -f "$MURMUR_ICE_FILE" ]; then
+  cd "$MUMBLE_AUTH_DIR"
+  "$MUMBLE_AUTH_VENV/bin/python3" -c "import Ice; Ice.loadSlice('$MURMUR_ICE_FILE')" 2>/dev/null && \
+    log_ok "Murmur.ice slice loaded successfully" || \
+    log_warn "Could not pre-load Murmur.ice slice (will try at runtime)"
+  # Copy the .ice file so the script can find it
+  cp "$MURMUR_ICE_FILE" "$MUMBLE_AUTH_DIR/Murmur.ice" 2>/dev/null || true
+else
+  log_warn "Murmur.ice not found - authenticator may not work. Install mumble-server first."
+fi
+
+chown -R "$ADMIN_USER:$ADMIN_USER" "$MUMBLE_AUTH_DIR" || true
+
+# Systemd service for the authenticator
+write_file_backup "/etc/systemd/system/das-krt-mumble-auth.service" "$(cat <<EOF
+[Unit]
+Description=das-krt Mumble Authenticator
+After=mumble-server.service das-krt-backend.service
+Requires=mumble-server.service
+
+[Service]
+Type=simple
+User=$ADMIN_USER
+WorkingDirectory=$MUMBLE_AUTH_DIR
+Environment=MUMBLE_AUTH_BACKEND=http://127.0.0.1:3000
+Environment=MUMBLE_ICE_HOST=127.0.0.1
+Environment=MUMBLE_ICE_PORT=6502
+ExecStart=$MUMBLE_AUTH_VENV/bin/python3 $MUMBLE_AUTH_DIR/mumble-auth.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+
+systemctl daemon-reload
+systemctl enable das-krt-mumble-auth >/dev/null 2>&1 || true
+log_ok "Mumble Authenticator installiert (Service: das-krt-mumble-auth)"
+
+# --------------------------------------------------
+# Mumble ACL Setup (via Ice)
+# --------------------------------------------------
+log_info "[7c/10] Setze Mumble ACL für 'discord'-Gruppe"
+
+write_file_backup "$MUMBLE_AUTH_DIR/setup-acl.py" "$(cat <<'ACLEOF'
+#!/usr/bin/env python3
+"""
+One-shot script: set Mumble ACLs on the Root channel via Ice.
+
+Grants the 'discord' group:
+  - Traverse, Enter (join channels)
+  - Speak, MuteDeafen, SelfMute, SelfDeafen
+  - TextMessage
+  - MakeTempChannel (create temporary channels)
+
+Also removes the default @all write-permissions so only
+authenticated Discord users can actually do things.
+"""
+
+import os
+import sys
+import Ice
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ICE_FILE = os.path.join(SCRIPT_DIR, 'Murmur.ice')
+if not os.path.exists(ICE_FILE):
+    for p in ['/usr/share/slice/Murmur.ice',
+              '/usr/share/mumble-server/Murmur.ice',
+              '/usr/share/mumble/Murmur.ice']:
+        if os.path.exists(p):
+            ICE_FILE = p
+            break
+
+Ice.loadSlice(ICE_FILE)
+import Murmur
+
+# Mumble permission bits (from Murmur.ice / Mumble source)
+PERM_NONE            = 0x00000
+PERM_WRITE           = 0x00001
+PERM_TRAVERSE        = 0x00002
+PERM_ENTER           = 0x00004
+PERM_SPEAK           = 0x00008
+PERM_MUTE_DEAFEN     = 0x00010
+PERM_MOVE            = 0x00020
+PERM_MAKE_CHANNEL    = 0x00040
+PERM_LINK_CHANNEL    = 0x00080
+PERM_WHISPER         = 0x00100
+PERM_TEXT_MESSAGE     = 0x00200
+PERM_MAKE_TEMP       = 0x00400
+PERM_LISTEN          = 0x00800
+# Shortcuts
+PERM_SELF_MUTE       = 0x10000
+PERM_SELF_DEAFEN     = 0x20000
+PERM_KICK            = 0x010000
+PERM_BAN             = 0x020000
+PERM_REGISTER        = 0x040000
+PERM_REGISTER_SELF   = 0x080000
+
+ICE_HOST = os.environ.get('MUMBLE_ICE_HOST', '127.0.0.1')
+ICE_PORT = os.environ.get('MUMBLE_ICE_PORT', '6502')
+ROOT_CHANNEL_ID = 0
+
+
+def main():
+    props = Ice.createProperties()
+    props.setProperty('Ice.ImplicitContext', 'Shared')
+    init_data = Ice.InitializationData()
+    init_data.properties = props
+    ice = Ice.initialize(init_data)
+
+    try:
+        proxy_str = f'Meta:tcp -h {ICE_HOST} -p {ICE_PORT}'
+        base = ice.stringToProxy(proxy_str)
+        meta = Murmur.MetaPrx.checkedCast(base)
+        if not meta:
+            print('ERROR: Could not connect to Murmur Ice interface')
+            sys.exit(1)
+
+        servers = meta.getBootedServers()
+        if not servers:
+            print('ERROR: No booted Mumble servers found')
+            sys.exit(1)
+
+        server = servers[0]
+        print(f'Connected to Mumble server id={server.id()}')
+
+        # Get current ACLs for Root channel
+        acls, groups, inherit = server.getACL(ROOT_CHANNEL_ID)
+
+        # ---- Ensure 'discord' group exists ----
+        discord_grp = None
+        for g in groups:
+            if g.name == 'discord':
+                discord_grp = g
+                break
+
+        if not discord_grp:
+            discord_grp = Murmur.Group()
+            discord_grp.name = 'discord'
+            discord_grp.inherited = False
+            discord_grp.inherit = True
+            discord_grp.inheritable = True
+            discord_grp.add = []
+            discord_grp.remove = []
+            discord_grp.members = []
+            groups.append(discord_grp)
+            print('Created "discord" group on Root channel')
+        else:
+            print('"discord" group already exists')
+
+        # ---- Build ACL entries ----
+        # We keep existing ACLs but ensure our entries are present.
+        # Strategy: remove any old 'discord' ACLs we created, then append fresh ones.
+
+        new_acls = []
+        for a in acls:
+            # Keep ACLs that are NOT for the 'discord' group (preserve admin / @all defaults)
+            if a.group != 'discord':
+                new_acls.append(a)
+
+        # 1. Discord group: full radio-user permissions on Root (inherited to all sub-channels)
+        discord_allow = (
+            PERM_TRAVERSE |
+            PERM_ENTER |
+            PERM_SPEAK |
+            PERM_WHISPER |
+            PERM_TEXT_MESSAGE |
+            PERM_MAKE_TEMP |
+            PERM_LISTEN |
+            PERM_SELF_MUTE |
+            PERM_SELF_DEAFEN
+        )
+
+        discord_acl = Murmur.ACL()
+        discord_acl.applyHere = True
+        discord_acl.applySubs = True
+        discord_acl.inherited = False
+        discord_acl.userid = -1       # -1 = group-based ACL
+        discord_acl.group = 'discord'
+        discord_acl.allow = discord_allow
+        discord_acl.deny = PERM_NONE
+        new_acls.append(discord_acl)
+
+        # 2. Deny @all most permissions so unauthenticated users can't do much
+        #    but keep Traverse so they can at least connect and be rejected by auth
+        #    (Remove any existing @all deny we added before to avoid duplicates)
+        final_acls = []
+        has_all_deny = False
+        for a in new_acls:
+            if a.group == 'all' and not a.inherited and a.deny != PERM_NONE:
+                has_all_deny = True
+            final_acls.append(a)
+
+        if not has_all_deny:
+            all_deny_acl = Murmur.ACL()
+            all_deny_acl.applyHere = True
+            all_deny_acl.applySubs = True
+            all_deny_acl.inherited = False
+            all_deny_acl.userid = -1
+            all_deny_acl.group = 'all'
+            all_deny_acl.allow = PERM_TRAVERSE  # need traverse to connect at all
+            all_deny_acl.deny = (
+                PERM_SPEAK |
+                PERM_MAKE_CHANNEL |
+                PERM_MAKE_TEMP |
+                PERM_MUTE_DEAFEN |
+                PERM_MOVE |
+                PERM_LINK_CHANNEL
+            )
+            # Insert @all deny BEFORE the discord allow so discord overrides it
+            final_acls.insert(len(final_acls) - 1, all_deny_acl)
+
+        # Apply
+        server.setACL(ROOT_CHANNEL_ID, final_acls, groups, inherit)
+        print(f'ACLs applied: {len(final_acls)} rules, discord group has full radio-user permissions')
+        print('Done.')
+
+    except Exception as e:
+        print(f'ERROR: {e}')
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        ice.destroy()
+
+
+if __name__ == '__main__':
+    main()
+ACLEOF
+)"
+
+chown "$ADMIN_USER:$ADMIN_USER" "$MUMBLE_AUTH_DIR/setup-acl.py" || true
+
+# Run ACL setup (Mumble server must be running + Ice accessible)
+# Give mumble-server a moment to start Ice listener
+sleep 2
+if "$MUMBLE_AUTH_VENV/bin/python3" "$MUMBLE_AUTH_DIR/setup-acl.py" 2>&1; then
+  log_ok "Mumble ACLs für 'discord'-Gruppe gesetzt"
+else
+  log_warn "ACL-Setup fehlgeschlagen (kann später manuell ausgeführt werden: $MUMBLE_AUTH_VENV/bin/python3 $MUMBLE_AUTH_DIR/setup-acl.py)"
+fi
 
 # --------------------------------------------------
 # Projektstruktur
@@ -289,12 +746,16 @@ function mustEnv(name) {
   mumbleManager.startCleanupScheduler();
 
   const httpServer = createHttpServer({
+    db,
     mapping,
     stateStore,
     txStore,
     usersStore,
     mumbleManager,
     adminToken: process.env.ADMIN_TOKEN || '',
+    allowedGuildIds: process.env.DISCORD_GUILD_ID
+      ? process.env.DISCORD_GUILD_ID.split(',')
+      : [],
   });
 
   const wsHub = createWsHub(httpServer, { stateStore });
@@ -379,6 +840,18 @@ function initDb(dbPath) {
 
     CREATE INDEX IF NOT EXISTS idx_discord_users_guild_updated_at
       ON discord_users(guild_id, updated_at_ms);
+
+    -- Frequency listener tracking (active radio users per freq)
+    CREATE TABLE IF NOT EXISTS freq_listeners (
+      discord_user_id TEXT NOT NULL,
+      freq_id         INTEGER NOT NULL,
+      radio_slot      INTEGER DEFAULT 0,
+      connected_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (discord_user_id, freq_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_freq_listeners_freq
+      ON freq_listeners(freq_id);
 
     -- Mumble channel tracking
     CREATE TABLE IF NOT EXISTS mumble_channels (
@@ -971,7 +1444,7 @@ write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ mapping, stateStore, txStore, usersStore, mumbleManager, adminToken }) {
+function createHttpServer({ db, mapping, stateStore, txStore, usersStore, mumbleManager, adminToken, allowedGuildIds }) {
   const app = express();
   app.use(express.json());
 
@@ -1028,7 +1501,11 @@ function createHttpServer({ mapping, stateStore, txStore, usersStore, mumbleMana
 
     if (onTxEventFn) onTxEventFn(payload);
 
-    res.json({ ok: true, data: payload });
+    // Count active listeners on this frequency
+    const lcRow = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
+    const listenerCount = lcRow ? lcRow.cnt : 0;
+
+    res.json({ ok: true, data: payload, listener_count: listenerCount });
   });
 
   // TX: read
@@ -1040,6 +1517,33 @@ function createHttpServer({ mapping, stateStore, txStore, usersStore, mumbleMana
 
     const rows = freq ? txStore.listRecentByFreq(freq, limit) : txStore.listRecent(limit);
     res.json({ ok: true, data: rows });
+  });
+
+  // Frequency listener registration
+  app.post('/freq/join', (req, res) => {
+    const { discordUserId, freqId, radioSlot } = req.body || {};
+    if (!discordUserId || !freqId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
+    }
+    const f = Number(freqId);
+    db.prepare(
+      'INSERT OR REPLACE INTO freq_listeners (discord_user_id, freq_id, radio_slot, connected_at_ms) VALUES (?,?,?,?)'
+    ).run(String(discordUserId), f, Number(radioSlot) || 0, Date.now());
+
+    const row = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
+    res.json({ ok: true, listener_count: row ? row.cnt : 0 });
+  });
+
+  app.post('/freq/leave', (req, res) => {
+    const { discordUserId, freqId } = req.body || {};
+    if (!discordUserId || !freqId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
+    }
+    const f = Number(freqId);
+    db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ? AND freq_id = ?').run(String(discordUserId), f);
+
+    const row = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
+    res.json({ ok: true, listener_count: row ? row.cnt : 0 });
   });
 
   // Users: read
@@ -1104,6 +1608,45 @@ function createHttpServer({ mapping, stateStore, txStore, usersStore, mumbleMana
     res.json({ ok: true, deletedCount: deleted });
   });
 
+  // -------------------------------------------------------
+  // Mumble authenticator endpoint
+  // Called by the Python Ice authenticator script.
+  // username = discord_user_id, password = guild_id
+  // -------------------------------------------------------
+  app.post('/mumble/auth', (req, res) => {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.json({ ok: false, reason: 'missing credentials' });
+    }
+
+    const discordUserId = String(username).trim();
+    const guildId = String(password).trim();
+
+    // 1. Check if the guild_id is in the allowed list
+    if (allowedGuildIds && allowedGuildIds.length > 0) {
+      if (!allowedGuildIds.includes(guildId)) {
+        console.log(`[mumble/auth] DENIED ${discordUserId} - guild ${guildId} not allowed`);
+        return res.json({ ok: false, reason: 'guild not allowed' });
+      }
+    }
+
+    // 2. Check if the Discord bot has seen this user in that guild
+    const user = usersStore ? usersStore.get(discordUserId, guildId) : null;
+    if (!user) {
+      console.log(`[mumble/auth] DENIED ${discordUserId} - not found in guild ${guildId}`);
+      return res.json({ ok: false, reason: 'user not found in guild' });
+    }
+
+    // 3. Authenticated! Return user info + groups for ACL
+    console.log(`[mumble/auth] OK ${discordUserId} (${user.display_name}) guild=${guildId}`);
+    return res.json({
+      ok: true,
+      userId: discordUserId,
+      displayName: user.display_name || discordUserId,
+      groups: ['discord', `guild-${guildId}`],
+    });
+  });
+
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
   return server;
@@ -1140,6 +1683,9 @@ if [[ "$CONFIGURE_ENV" =~ ^[jJ]$ ]]; then
   cat > "$ENV_FILE" <<EOF
 DISCORD_TOKEN=$DISCORD_TOKEN
 $([ -n "$DISCORD_GUILD_ID" ] && echo "DISCORD_GUILD_ID=$DISCORD_GUILD_ID" || echo "# DISCORD_GUILD_ID=123456789012345678")
+
+# Mumble authenticator backend URL (used by mumble-auth.py)
+MUMBLE_AUTH_BACKEND=http://127.0.0.1:3000
 
 BIND_HOST=$BIND_HOST
 BIND_PORT=$BIND_PORT
@@ -1240,10 +1786,12 @@ while true; do
   echo -e "${CYAN}6) TX Event senden (start/stop)${NC}"
   echo -e "${CYAN}7) TX Recent anzeigen${NC}"
   echo -e "${CYAN}8) Users Recent anzeigen${NC}"
-  echo -e "${CYAN}9) Beenden${NC}"
+  echo -e "${CYAN}9) Mumble ACLs neu setzen (discord-Gruppe)${NC}"
+  echo -e "${CYAN}10) Mumble Authenticator Logs (journalctl -f)${NC}"
+  echo -e "${CYAN}0) Beenden${NC}"
   echo ""
 
-  read -r -p "$(echo -e "${CYAN}Auswahl [1-9]: ${NC}")" CHOICE
+  read -r -p "$(echo -e "${CYAN}Auswahl [0-10]: ${NC}")" CHOICE
 
   case "$CHOICE" in
     1)
@@ -1336,6 +1884,18 @@ while true; do
       echo ""
       ;;
     9)
+      log_info "Setze Mumble ACLs für 'discord'-Gruppe..."
+      if "$MUMBLE_AUTH_VENV/bin/python3" "$MUMBLE_AUTH_DIR/setup-acl.py" 2>&1; then
+        log_ok "ACLs erfolgreich gesetzt"
+      else
+        log_error "ACL-Setup fehlgeschlagen"
+      fi
+      ;;
+    10)
+      log_info "Mumble Authenticator Logs: journalctl -u das-krt-mumble-auth -f"
+      journalctl -u das-krt-mumble-auth -f
+      ;;
+    0)
       log_ok "Bye."
       break
       ;;

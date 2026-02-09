@@ -16,7 +16,8 @@ public enum RadioStatus
     Idle,           // No activity
     Transmitting,   // User is transmitting (green up arrow)  
     TransmitError,  // Error while transmitting (yellow arrow)
-    Receiving       // Incoming transmission (red down arrow)
+    Receiving,      // Incoming transmission (red down arrow)
+    Broadcasting    // Talk to all mode (blue up arrow)
 }
 
 /// <summary>
@@ -27,6 +28,7 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     private int _index;
     private bool _isEnabled;
     private bool _isEmergencyRadio;
+    private bool _isMuted;
     private string _label = "Radio";
     private string _freqInput = "";
     private int _freqId = 1000;
@@ -69,6 +71,12 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     }
 
     public bool CanChangeFrequency => !IsEmergencyRadio;
+
+    public bool IsMuted
+    {
+        get => _isMuted;
+        set { _isMuted = value; OnPropertyChanged(); }
+    }
 
     public string Label
     {
@@ -148,15 +156,18 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     }
 
     // Arrow visibility and colors based on status
-    public Visibility StatusArrowUp => Status == RadioStatus.Transmitting || Status == RadioStatus.TransmitError 
+    public Visibility StatusArrowUp => Status == RadioStatus.Transmitting || Status == RadioStatus.TransmitError || Status == RadioStatus.Broadcasting
         ? Visibility.Visible : Visibility.Hidden;
     
     public Visibility StatusArrowDown => Status == RadioStatus.Receiving 
         ? Visibility.Visible : Visibility.Hidden;
 
-    public SolidColorBrush StatusUpColor => Status == RadioStatus.Transmitting 
-        ? new SolidColorBrush(Color.FromRgb(74, 255, 158))   // Green
-        : new SolidColorBrush(Color.FromRgb(255, 200, 50));   // Yellow
+    public SolidColorBrush StatusUpColor => Status switch
+    {
+        RadioStatus.Transmitting => new SolidColorBrush(Color.FromRgb(74, 255, 158)),   // Green
+        RadioStatus.Broadcasting => new SolidColorBrush(Color.FromRgb(74, 158, 255)),   // Blue
+        _ => new SolidColorBrush(Color.FromRgb(255, 200, 50))   // Yellow for error
+    };
 
     public SolidColorBrush StatusDownColor => new SolidColorBrush(Color.FromRgb(255, 74, 74)); // Red
 
@@ -239,6 +250,18 @@ public class RadioPanelViewModel : INotifyPropertyChanged
             Status = hasError ? RadioStatus.TransmitError : RadioStatus.Transmitting;
         }
         else if (Status == RadioStatus.Transmitting || Status == RadioStatus.TransmitError)
+        {
+            Status = RadioStatus.Idle;
+        }
+    }
+
+    public void SetBroadcasting(bool isBroadcasting)
+    {
+        if (isBroadcasting)
+        {
+            Status = RadioStatus.Broadcasting;
+        }
+        else if (Status == RadioStatus.Broadcasting)
         {
             Status = RadioStatus.Idle;
         }

@@ -22,6 +22,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private BackendClient? _backend;
     private AudioCaptureService? _audio;
     private MumbleService? _mumble;
+    private BeepService? _beepService;
     private CancellationTokenSource? _streamCts;
     private RadioPanelViewModel? _activeRadio;
     private HashSet<RadioPanelViewModel> _activeBroadcastRadios = new();
@@ -63,6 +64,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         get => _discordUserId;
         set { _discordUserId = value; OnPropertyChanged(); }
+    }
+
+    private string _guildId = "";
+    public string GuildId
+    {
+        get => _guildId;
+        set { _guildId = value; OnPropertyChanged(); }
     }
 
     private int _sampleRate = 48000;
@@ -155,10 +163,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public bool PlayPttBeep
     {
         get => _playPttBeep;
-        set { _playPttBeep = value; OnPropertyChanged(); MarkGlobalChanged(); }
+        set 
+        { 
+            _playPttBeep = value; 
+            OnPropertyChanged(); 
+            MarkGlobalChanged();
+            if (_beepService != null) _beepService.Enabled = value;
+        }
     }
 
-    private bool _autoConnect;
+    private bool _autoConnect = true;
     public bool AutoConnect
     {
         get => _autoConnect;
@@ -185,6 +199,30 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private bool _debugLoggingEnabled;
+    public bool DebugLoggingEnabled
+    {
+        get => _debugLoggingEnabled;
+        set
+        {
+            _debugLoggingEnabled = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+
+            if (_debugLoggingEnabled)
+            {
+                EnsureDebugLogDirectory();
+                LogDebug("Debug logging enabled");
+            }
+            else
+            {
+                LogDebug("Debug logging disabled");
+            }
+        }
+    }
+
+    public string DebugLogFilePath => _debugLogFilePath;
+
     public Visibility EmergencyRadioVisibility => EnableEmergencyRadio ? Visibility.Visible : Visibility.Collapsed;
 
     private string _talkToAllHotkey = "";
@@ -199,6 +237,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         get => _pttMuteAllHotkey;
         set { _pttMuteAllHotkey = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private string _toggleMuteAllHotkey = "";
+    public string ToggleMuteAllHotkey
+    {
+        get => _toggleMuteAllHotkey;
+        set { _toggleMuteAllHotkey = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _allRadiosMuted;
+    public bool AllRadiosMuted
+    {
+        get => _allRadiosMuted;
+        set { _allRadiosMuted = value; OnPropertyChanged(); }
     }
 
     // Audio devices
@@ -216,7 +268,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string SelectedAudioOutputDevice
     {
         get => _selectedAudioOutputDevice;
-        set { _selectedAudioOutputDevice = value; OnPropertyChanged(); MarkGlobalChanged(); }
+        set 
+        { 
+            _selectedAudioOutputDevice = value; 
+            OnPropertyChanged(); 
+            MarkGlobalChanged();
+            _beepService?.SetOutputDevice(value);
+            _mumble?.SetOutputDevice(value);
+        }
     }
 
     // Has unsaved changes
@@ -237,17 +296,30 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string StatusText
     {
         get => _statusText;
-        set { _statusText = value; OnPropertyChanged(); }
+        set
+        {
+            _statusText = value;
+            OnPropertyChanged();
+            LogDebug($"Status: {value}");
+        }
     }
 
     private bool _isStreaming;
     public bool IsStreaming
     {
         get => _isStreaming;
-        set { _isStreaming = value; OnPropertyChanged(); OnPropertyChanged(nameof(StreamingIndicator)); }
+        set { _isStreaming = value; OnPropertyChanged(); OnPropertyChanged(nameof(StreamingIndicator)); OnPropertyChanged(nameof(StreamingIndicatorColor)); }
+    }
+
+    private bool _isBroadcasting;
+    public bool IsBroadcasting
+    {
+        get => _isBroadcasting;
+        set { _isBroadcasting = value; OnPropertyChanged(); OnPropertyChanged(nameof(StreamingIndicatorColor)); }
     }
 
     public string StreamingIndicator => IsStreaming ? "On" : "Off";
+    public string StreamingIndicatorColor => IsBroadcasting ? "#4A9EFF" : "#4AFF9E"; // Blue when broadcasting, green otherwise
 
     #endregion
 
@@ -255,6 +327,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public MainViewModel()
     {
+        _debugLogFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "KRT-Com_Discord",
+            "debug.log");
+
+        // Initialize beep service
+        _beepService = new BeepService();
+
         // Initialize 8 radio panels with default names
         for (int i = 0; i < 8; i++)
         {
@@ -409,6 +489,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        // Only works in advanced mode
+        if (!AdvancedMode)
+        {
+            StatusText = "Talk to All requires Advanced Mode";
+            return;
+        }
+
         var broadcastRadios = RadioPanels
             .Where(r => r.IsEnabled && r.IncludedInBroadcast)
             .ToList();
@@ -419,43 +506,172 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        _activeBroadcastRadios = new HashSet<RadioPanelViewModel>(broadcastRadios);
-
-        foreach (var radio in broadcastRadios)
+        try
         {
-            radio.SetTransmitting(true);
+            _activeBroadcastRadios = new HashSet<RadioPanelViewModel>(broadcastRadios);
+            IsBroadcasting = true;
+
+            foreach (var radio in broadcastRadios)
+            {
+                radio.SetBroadcasting(true);
+            }
+
+            StatusText = $"Broadcasting to {broadcastRadios.Count} radios";
+
+            // Connect to Mumble if needed
+            if (_mumble == null || !_mumble.IsConnected)
+            {
+                await ConnectMumbleAsync();
+            }
+
+            if (_mumble == null || !_mumble.IsConnected)
+            {
+                StatusText = "Mumble not connected - broadcast failed";
+                foreach (var radio in broadcastRadios)
+                {
+                    radio.SetBroadcasting(false);
+                }
+                _activeBroadcastRadios.Clear();
+                IsBroadcasting = false;
+                return;
+            }
+
+            // Start transmitting to first radio's frequency (broadcasts will go to all)
+            var firstRadio = broadcastRadios.First();
+            await _mumble.JoinFrequencyAsync(firstRadio.FreqId);
+            _mumble.StartTransmit();
+
+            // Start audio capture
+            _audio?.Dispose();
+            _audio = new AudioCaptureService(SelectedAudioInputDevice);
+            _audio.AudioFrame += AudioOnAudioFrame;
+            _audio.Start();
+
+            IsStreaming = true;
+            _beepService?.PlayTalkToAllBeep();
         }
-
-        StatusText = $"Broadcasting to {broadcastRadios.Count} radios";
-        IsStreaming = true;
-
-        // Start audio capture once
-        _audio?.Dispose();
-        _audio = new AudioCaptureService();
-        _audio.AudioFrame += AudioOnAudioFrame;
-        _audio.Start();
+        catch (Exception ex)
+        {
+            StatusText = $"Broadcast error: {ex.Message}";
+            foreach (var radio in _activeBroadcastRadios)
+            {
+                radio.SetBroadcasting(false);
+            }
+            _activeBroadcastRadios.Clear();
+            IsBroadcasting = false;
+        }
     }
 
     public async Task StopTalkToAllAsync()
     {
-        if (!IsStreaming)
+        if (!IsStreaming || !IsBroadcasting)
         {
             return;
         }
 
+        var userName = string.IsNullOrWhiteSpace(DiscordUserId) ? "You" : $"You ({DiscordUserId})";
+        var timestamp = $"{DateTime.Now:HH:mm} - {userName} (Broadcast)";
+
         foreach (var radio in _activeBroadcastRadios)
         {
-            radio.SetTransmitting(false);
+            radio.SetBroadcasting(false);
+            radio.AddTransmission(timestamp);
         }
         _activeBroadcastRadios.Clear();
 
         _audio?.Dispose();
         _audio = null;
 
+        _mumble?.StopTransmit();
+
+        IsBroadcasting = false;
         IsStreaming = false;
+        _beepService?.PlayTxEndBeep();
         StatusText = "Broadcast stopped";
 
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Toggle mute all radios
+    /// </summary>
+    public void ToggleMuteAllRadios()
+    {
+        AllRadiosMuted = !AllRadiosMuted;
+        
+        // Apply mute state to all radios
+        foreach (var panel in RadioPanels)
+        {
+            panel.IsMuted = AllRadiosMuted;
+        }
+        EmergencyRadio.IsMuted = AllRadiosMuted;
+        
+        StatusText = AllRadiosMuted ? "All radios muted" : "All radios unmuted";
+    }
+
+    /// <summary>
+    /// Push-to-Mute all radios (while key is held)
+    /// </summary>
+    public void SetAllRadiosMuted(bool muted)
+    {
+        AllRadiosMuted = muted;
+        
+        // Apply mute state to all radios
+        foreach (var panel in RadioPanels)
+        {
+            panel.IsMuted = muted;
+        }
+        EmergencyRadio.IsMuted = muted;
+        
+        StatusText = muted ? "All radios muted (PTM)" : "All radios unmuted";
+    }
+
+    /// <summary>
+    /// Check if a hotkey is already in use by another function.
+    /// Returns the name of the conflicting function, or null if no conflict.
+    /// </summary>
+    public string? GetHotkeyConflict(string hotkey, string excludeSource = "")
+    {
+        if (string.IsNullOrWhiteSpace(hotkey)) return null;
+
+        // Check radio panel hotkeys
+        foreach (var panel in RadioPanels)
+        {
+            if (panel.Hotkey == hotkey && panel.Label != excludeSource)
+                return panel.Label;
+        }
+
+        // Check emergency radio
+        if (EmergencyRadio.Hotkey == hotkey && "Emergency" != excludeSource)
+            return "Emergency";
+
+        // Check global hotkeys
+        if (TalkToAllHotkey == hotkey && "Talk To All" != excludeSource)
+            return "Talk To All";
+        if (PttMuteAllHotkey == hotkey && "PTM All Radio" != excludeSource)
+            return "PTM All Radio";
+        if (ToggleMuteAllHotkey == hotkey && "TTM All Radio" != excludeSource)
+            return "TTM All Radio";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Clear a hotkey from any function that currently uses it.
+    /// </summary>
+    public void ClearHotkeyFromAll(string hotkey)
+    {
+        if (string.IsNullOrWhiteSpace(hotkey)) return;
+
+        foreach (var panel in RadioPanels)
+        {
+            if (panel.Hotkey == hotkey) panel.Hotkey = "";
+        }
+
+        if (EmergencyRadio.Hotkey == hotkey) EmergencyRadio.Hotkey = "";
+        if (TalkToAllHotkey == hotkey) TalkToAllHotkey = "";
+        if (PttMuteAllHotkey == hotkey) PttMuteAllHotkey = "";
+        if (ToggleMuteAllHotkey == hotkey) ToggleMuteAllHotkey = "";
     }
 
     private void LoadFromConfig(CompanionConfig config)
@@ -465,12 +681,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         ServerBaseUrl = config.ServerBaseUrl;
         AdminToken = config.AdminToken;
         DiscordUserId = config.DiscordUserId;
+        GuildId = config.GuildId;
         SampleRate = config.SampleRate;
 
         MumbleHost = config.MumbleHost;
         MumblePort = config.MumblePort;
         MumbleUsername = config.MumbleUsername;
         MumblePassword = config.MumblePassword;
+
+        AutoConnect = config.AutoConnect;
+        DeactivateRadiosOnAutoConnect = config.DeactivateRadiosOnAutoConnect;
+        DebugLoggingEnabled = config.DebugLoggingEnabled;
 
         // Load bindings into radio panels
         for (int i = 0; i < RadioPanels.Count && i < config.Bindings.Count; i++)
@@ -493,6 +714,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void SyncRadioPanelsToBindings()
     {
         Bindings.Clear();
+        
+        // Add radio panel bindings
         foreach (var panel in RadioPanels)
         {
             Bindings.Add(new HotkeyBinding
@@ -504,6 +727,56 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 ChannelName = ""
             });
         }
+        
+        // Add Emergency radio binding
+        if (EmergencyRadio != null && !string.IsNullOrEmpty(EmergencyRadio.Hotkey))
+        {
+            Bindings.Add(new HotkeyBinding
+            {
+                IsEnabled = true,
+                FreqId = EmergencyRadio.FreqId,
+                Hotkey = EmergencyRadio.Hotkey,
+                Label = "Emergency",
+                ChannelName = ""
+            });
+        }
+        
+        // Add global hotkeys (use negative FreqId to identify them)
+        if (!string.IsNullOrEmpty(TalkToAllHotkey))
+        {
+            Bindings.Add(new HotkeyBinding
+            {
+                IsEnabled = true,
+                FreqId = -1, // Talk to All
+                Hotkey = TalkToAllHotkey,
+                Label = "Talk To All",
+                ChannelName = ""
+            });
+        }
+        
+        if (!string.IsNullOrEmpty(PttMuteAllHotkey))
+        {
+            Bindings.Add(new HotkeyBinding
+            {
+                IsEnabled = true,
+                FreqId = -2, // PTM All Radio
+                Hotkey = PttMuteAllHotkey,
+                Label = "PTM All Radio",
+                ChannelName = ""
+            });
+        }
+        
+        if (!string.IsNullOrEmpty(ToggleMuteAllHotkey))
+        {
+            Bindings.Add(new HotkeyBinding
+            {
+                IsEnabled = true,
+                FreqId = -3, // Toggle Mute All
+                Hotkey = ToggleMuteAllHotkey,
+                Label = "TTM All Radio",
+                ChannelName = ""
+            });
+        }
     }
 
     private void ApplyToConfig()
@@ -511,6 +784,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.ServerBaseUrl = ServerBaseUrl;
         _config.AdminToken = AdminToken;
         _config.DiscordUserId = DiscordUserId;
+        _config.GuildId = GuildId;
         _config.SampleRate = SampleRate;
 
         _config.MumbleHost = MumbleHost;
@@ -518,7 +792,52 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.MumbleUsername = MumbleUsername;
         _config.MumblePassword = MumblePassword;
 
+        _config.AutoConnect = AutoConnect;
+        _config.DeactivateRadiosOnAutoConnect = DeactivateRadiosOnAutoConnect;
+        _config.DebugLoggingEnabled = DebugLoggingEnabled;
+
         _config.Bindings = Bindings.ToList();
+    }
+
+    private readonly object _debugLogLock = new();
+    private readonly string _debugLogFilePath;
+
+    private void EnsureDebugLogDirectory()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_debugLogFilePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+        }
+        catch
+        {
+            // Ignore logging setup failures
+        }
+    }
+
+    private void LogDebug(string message)
+    {
+        if (!_debugLoggingEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            EnsureDebugLogDirectory();
+            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}";
+            lock (_debugLogLock)
+            {
+                File.AppendAllText(_debugLogFilePath, line);
+            }
+        }
+        catch
+        {
+            // Ignore logging failures
+        }
     }
 
     private async Task SyncFreqNamesAsync()
@@ -566,6 +885,30 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _ = Application.Current.Dispatcher.InvokeAsync(async () =>
         {
+            // Handle global hotkeys (negative FreqId)
+            if (binding.FreqId == -1) // Talk to All
+            {
+                await StartTalkToAllAsync();
+                return;
+            }
+            else if (binding.FreqId == -2) // PTM All Radio
+            {
+                SetAllRadiosMuted(true);
+                return;
+            }
+            else if (binding.FreqId == -3) // Toggle Mute All
+            {
+                ToggleMuteAllRadios();
+                return;
+            }
+            
+            // Check Emergency radio
+            if (EmergencyRadio != null && EmergencyRadio.FreqId == binding.FreqId && EmergencyRadio.Hotkey == binding.Hotkey)
+            {
+                await HandlePttPressedAsync(EmergencyRadio);
+                return;
+            }
+            
             // Find matching radio panel
             var radio = RadioPanels.FirstOrDefault(r => r.FreqId == binding.FreqId && r.Hotkey == binding.Hotkey);
             if (radio != null)
@@ -579,6 +922,22 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _ = Application.Current.Dispatcher.InvokeAsync(async () =>
         {
+            // Handle global hotkey releases
+            if (binding.FreqId == -1) // Talk to All
+            {
+                await StopTalkToAllAsync();
+                return;
+            }
+            else if (binding.FreqId == -2) // PTM All Radio - unmute on release
+            {
+                SetAllRadiosMuted(false);
+                return;
+            }
+            else if (binding.FreqId == -3) // Toggle Mute All - no action on release
+            {
+                return;
+            }
+            
             await HandlePttReleasedAsync();
         });
     }
@@ -587,6 +946,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         if (IsStreaming)
         {
+            return;
+        }
+
+        // Don't allow transmitting on disabled radios
+        if (!radio.IsEnabled)
+        {
+            StatusText = $"Radio {radio.Label} is disabled";
             return;
         }
 
@@ -600,7 +966,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _backend = new BackendClient(ServerBaseUrl, AdminToken);
 
             _audio?.Dispose();
-            _audio = new AudioCaptureService();
+            _audio = new AudioCaptureService(SelectedAudioInputDevice);
             _audio.AudioFrame += AudioOnAudioFrame;
 
             _streamCts?.Dispose();
@@ -614,8 +980,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             if (_mumble != null && _mumble.IsConnected)
             {
-                // Join the frequency channel
-                await _mumble.JoinFrequencyAsync(radio.FreqId);
+                // Join the frequency channel — abort if join fails
+                bool joined = await _mumble.JoinFrequencyAsync(radio.FreqId);
+                if (!joined)
+                {
+                    StatusText = $"Cannot transmit: channel {radio.FreqId} unavailable";
+                    radio.SetTransmitting(false);
+                    return;
+                }
                 _mumble.StartTransmit();
                 _audio.Start();
             }
@@ -626,10 +998,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // Notify backend of TX start (non-fatal if fails)
+            // Notify backend of TX start and get listener count (non-fatal if fails)
             try
             {
-                await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
+                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
+                if (listeners >= 0) radio.ListenerCount = listeners;
             }
             catch (Exception backendEx)
             {
@@ -638,6 +1011,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             IsStreaming = true;
+            _beepService?.PlayTxStartBeep();
         }
         catch (Exception ex)
         {
@@ -667,7 +1041,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (radio != null && _backend != null)
             {
-                await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
+                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
+                if (listeners >= 0) radio.ListenerCount = listeners;
             }
         }
         catch
@@ -683,7 +1058,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _streamCts?.Dispose();
         _streamCts = null;
 
+        // Log the transmission to recent activity
+        if (radio != null)
+        {
+            var userName = string.IsNullOrWhiteSpace(DiscordUserId) ? "You" : $"You ({DiscordUserId})";
+            radio.AddTransmission($"{DateTime.Now:HH:mm} - {userName}");
+        }
+
         IsStreaming = false;
+        _beepService?.PlayTxEndBeep();
         StatusText = "PTT stop";
     }
 
@@ -714,10 +1097,56 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _mumble = new MumbleService();
         _mumble.StatusChanged += status => Application.Current.Dispatcher.Invoke(() => StatusText = status);
         _mumble.ErrorOccurred += ex => Application.Current.Dispatcher.Invoke(() => StatusText = $"Mumble error: {ex.Message}");
+        _mumble.AudioReceived += OnMumbleAudioReceived;
+        
+        // Set output device
+        _mumble.SetOutputDevice(SelectedAudioOutputDevice);
 
-        var username = string.IsNullOrWhiteSpace(MumbleUsername) ? $"Companion_{DiscordUserId}" : MumbleUsername;
-        await _mumble.ConnectAsync(MumbleHost, MumblePort, username, MumblePassword);
+        // Mumble auth: discord_user_id as username, guild_id as password
+        // If a manual MumbleUsername is set, use it instead (for debugging / SuperUser)
+        var username = !string.IsNullOrWhiteSpace(MumbleUsername)
+            ? MumbleUsername
+            : !string.IsNullOrWhiteSpace(DiscordUserId)
+                ? DiscordUserId
+                : $"Companion_{Environment.MachineName}";
+
+        var password = !string.IsNullOrWhiteSpace(MumblePassword)
+            ? MumblePassword
+            : GuildId ?? "";
+
+        await _mumble.ConnectAsync(MumbleHost, MumblePort, username, password);
         IsMumbleConnected = _mumble.IsConnected;
+    }
+    
+    private void OnMumbleAudioReceived(uint sessionId, string username)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            // Add to recent transmissions for active radio (if connected to a channel)
+            var timestamp = $"{DateTime.Now:HH:mm} - {username}";
+            
+            // Find active radio panel based on current channel/frequency
+            if (_activeRadio != null && _activeRadio.IsEnabled && !_activeRadio.IsMuted)
+            {
+                _activeRadio.AddTransmission(timestamp);
+            }
+            else
+            {
+                // Add to all enabled, non-muted radios that are listening
+                foreach (var radio in RadioPanels.Where(r => r.IsEnabled && !r.IsMuted))
+                {
+                    radio.AddTransmission(timestamp);
+                    break; // Just add to first active for now
+                }
+                if (EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted)
+                {
+                    EmergencyRadio.AddTransmission(timestamp);
+                }
+            }
+            
+            // Play RX beep for incoming audio
+            _beepService?.PlayRxStartBeep();
+        });
     }
 
     public async Task DisconnectMumbleAsync()

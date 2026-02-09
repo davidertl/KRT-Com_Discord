@@ -135,8 +135,8 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     {
         get
         {
-            if (_balance < 45) return $"L{50 - _balance}";
-            if (_balance > 55) return $"R{_balance - 50}";
+            if (_balance < 45) return $"L{(int)Math.Round((50 - _balance) * 2.0)}";
+            if (_balance > 55) return $"R{(int)Math.Round((_balance - 50) * 2.0)}";
             return "C";
         }
     }

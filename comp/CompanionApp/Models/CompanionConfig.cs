@@ -18,11 +18,36 @@ public class CompanionConfig
 
     // App settings
     public bool AutoConnect { get; set; } = true;
-    public bool DeactivateRadiosOnAutoConnect { get; set; } = false;
+    public bool SaveRadioActiveState { get; set; } = true;
+    public bool TurnOnEmergencyOnStartup { get; set; } = true;
     public bool DebugLoggingEnabled { get; set; } = false;
+    public bool EnableEmergencyRadio { get; set; } = true;
+
+    // Master volume (0-125, default 100)
+    public int InputVolume { get; set; } = 100;
+    public int OutputVolume { get; set; } = 100;
+
+    // Per-radio persisted state
+    public List<RadioState> RadioStates { get; set; } = new();
+
+    // Emergency radio persisted state
+    public RadioState? EmergencyRadioState { get; set; }
 
     public List<HotkeyBinding> Bindings { get; set; } = new()
     {
         new HotkeyBinding { FreqId = 1050, Hotkey = "LeftCtrl", Label = "Main" }
     };
+}
+
+/// <summary>
+/// Persisted state for a single radio panel.
+/// </summary>
+public class RadioState
+{
+    public int Index { get; set; }
+    public bool IsEnabled { get; set; }
+    public bool IsMuted { get; set; }
+    public int Volume { get; set; } = 100;
+    public int Balance { get; set; } = 50;
+    public bool IncludedInBroadcast { get; set; }
 }

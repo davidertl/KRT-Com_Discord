@@ -213,9 +213,9 @@
                     <ColumnDefinition Width="Auto"/>
                   </Grid.ColumnDefinitions>
 
-                  <!-- Mute Checkbox -->
-                  <CheckBox Grid.Column="0" IsChecked="{Binding EmergencyRadio.IsMuted}" VerticalAlignment="Center" 
-                            Margin="0,0,8,0" ToolTip="Mute this radio"/>
+                  <!-- Enable Checkbox -->
+                  <CheckBox Grid.Column="0" IsChecked="{Binding EmergencyRadio.IsEnabled}" VerticalAlignment="Center" 
+                            Margin="0,0,8,0" ToolTip="Enable emergency radio"/>
 
                   <!-- Status Arrows -->
                   <StackPanel Grid.Column="1" VerticalAlignment="Center" Width="30" Margin="0,0,12,0">
@@ -292,7 +292,6 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
                           </Grid.ColumnDefinitions>
 
                           <!-- Status Arrows -->
@@ -318,14 +317,14 @@
                                        VerticalAlignment="Center" Margin="4,0,0,0"/>
                           </StackPanel>
 
-                          <!-- Mute Checkbox -->
-                          <CheckBox Grid.Column="4" IsChecked="{Binding IsMuted}" VerticalAlignment="Center" Margin="8,0,0,0"
-                                    ToolTip="Mute this radio" Content="🔇"/>
-
-                          <!-- Broadcast Checkbox (Advanced Mode Only) -->
-                          <CheckBox Grid.Column="5" Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
-                                    ToolTip="Include in Talk To All broadcast" Margin="8,0,0,0"
-                                    Visibility="{Binding ShowBroadcastCheckbox, Converter={StaticResource BoolToVis}}"/>
+                          <!-- Mute + Broadcast stacked -->
+                          <StackPanel Grid.Column="4" VerticalAlignment="Center">
+                            <CheckBox IsChecked="{Binding IsMuted}" Margin="0,0,0,2"
+                                      ToolTip="Mute this radio" Content="🔇"/>
+                            <CheckBox Content="📢" IsChecked="{Binding IncludedInBroadcast}" 
+                                      ToolTip="Include in Talk To All broadcast"
+                                      Visibility="{Binding ShowBroadcastCheckbox, Converter={StaticResource BoolToVis}}"/>
+                          </StackPanel>
                         </Grid>
 
                         <!-- Frequency Display -->
@@ -600,11 +599,16 @@
                 <TextBlock Text="Log file:" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
                 <TextBlock Text="{Binding DebugLogFilePath}" Foreground="{StaticResource TextSecondary}" 
                            FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                <CheckBox Content="    Deactivate all radios except Emergency" Foreground="{StaticResource TextSecondary}" 
-                          IsChecked="{Binding DeactivateRadiosOnAutoConnect}" Margin="20,0,0,10"
-                          IsEnabled="{Binding AutoConnect}"/>
                 <CheckBox Content="Enable Emergency Radio" Foreground="{StaticResource TextSecondary}" 
-                          IsChecked="{Binding EnableEmergencyRadio}"/>
+                          IsChecked="{Binding EnableEmergencyRadio}" Margin="0,0,0,15"/>
+                
+                <TextBlock Text="Startup" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                <CheckBox Content="Save active state from radios for next startup" Foreground="{StaticResource TextSecondary}" 
+                          IsChecked="{Binding SaveRadioActiveState}" Margin="0,0,0,10"
+                          ToolTip="When enabled, radios remember their on/off state between sessions"/>
+                <CheckBox Content="Turn on Emergency radio on startup" Foreground="{StaticResource TextSecondary}" 
+                          IsChecked="{Binding TurnOnEmergencyOnStartup}" Margin="0,0,0,10"
+                          IsEnabled="{Binding EnableEmergencyRadio}"/>
               </StackPanel>
             </Border>
 
@@ -614,11 +618,31 @@
                 
                 <TextBlock Text="Input Device (Microphone)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox ItemsSource="{Binding AudioInputDevices}" SelectedValue="{Binding SelectedAudioInputDevice}" 
-                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <Grid Margin="0,0,0,15">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="45"/>
+                  </Grid.ColumnDefinitions>
+                  <Slider Grid.Column="0" Minimum="0" Maximum="125" Value="{Binding InputVolume}" 
+                          VerticalAlignment="Center" ToolTip="Input volume (0-125%)"/>
+                  <TextBlock Grid.Column="1" Text="{Binding InputVolumeText}" Foreground="{StaticResource TextSecondary}" 
+                             VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12"/>
+                </Grid>
 
                 <TextBlock Text="Output Device (Speakers)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox ItemsSource="{Binding AudioOutputDevices}" SelectedValue="{Binding SelectedAudioOutputDevice}" 
-                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+                          Width="350" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                <Grid Margin="0,0,0,15">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="45"/>
+                  </Grid.ColumnDefinitions>
+                  <Slider Grid.Column="0" Minimum="0" Maximum="125" Value="{Binding OutputVolume}" 
+                          VerticalAlignment="Center" ToolTip="Output volume (0-125%)"/>
+                  <TextBlock Grid.Column="1" Text="{Binding OutputVolumeText}" Foreground="{StaticResource TextSecondary}" 
+                             VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12"/>
+                </Grid>
 
                 <TextBlock Text="Sample Rate" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                 <ComboBox Width="150" HorizontalAlignment="Left">

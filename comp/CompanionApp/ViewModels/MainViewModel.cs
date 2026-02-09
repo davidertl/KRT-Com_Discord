@@ -165,11 +165,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _autoConnect = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
 
-    private bool _deactivateRadiosOnAutoConnect;
-    public bool DeactivateRadiosOnAutoConnect
+    private bool _saveRadioActiveState = true;
+    public bool SaveRadioActiveState
     {
-        get => _deactivateRadiosOnAutoConnect;
-        set { _deactivateRadiosOnAutoConnect = value; OnPropertyChanged(); MarkGlobalChanged(); }
+        get => _saveRadioActiveState;
+        set { _saveRadioActiveState = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _turnOnEmergencyOnStartup = true;
+    public bool TurnOnEmergencyOnStartup
+    {
+        get => _turnOnEmergencyOnStartup;
+        set { _turnOnEmergencyOnStartup = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
 
     private bool _enableEmergencyRadio = true;
@@ -232,6 +239,38 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         get => _toggleMuteAllHotkey;
         set { _toggleMuteAllHotkey = value; OnPropertyChanged(); MarkGlobalChanged(); }
     }
+
+    // Master input volume (0-125, default 100)
+    private int _inputVolume = 100;
+    public int InputVolume
+    {
+        get => _inputVolume;
+        set 
+        { 
+            _inputVolume = Math.Clamp(value, 0, 125); 
+            OnPropertyChanged(); 
+            OnPropertyChanged(nameof(InputVolumeText));
+            MarkGlobalChanged();
+            _voice?.SetMasterInputVolume(_inputVolume / 100f);
+        }
+    }
+    public string InputVolumeText => $"{_inputVolume}%";
+
+    // Master output volume (0-125, default 100)
+    private int _outputVolume = 100;
+    public int OutputVolume
+    {
+        get => _outputVolume;
+        set 
+        { 
+            _outputVolume = Math.Clamp(value, 0, 125); 
+            OnPropertyChanged(); 
+            OnPropertyChanged(nameof(OutputVolumeText));
+            MarkGlobalChanged();
+            _voice?.SetMasterOutputVolume(_outputVolume / 100f);
+        }
+    }
+    public string OutputVolumeText => $"{_outputVolume}%";
 
     private bool _allRadiosMuted;
     public bool AllRadiosMuted
@@ -391,13 +430,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         if (AutoConnect)
         {
-            // Deactivate all radios except Emergency if option is set
-            if (DeactivateRadiosOnAutoConnect)
+            // If NOT saving active state, turn all radios off on startup
+            if (!SaveRadioActiveState)
             {
                 foreach (var panel in RadioPanels)
                 {
                     panel.IsEnabled = false;
                 }
+            }
+
+            // If "Turn on Emergency on startup" is set, enable it
+            if (TurnOnEmergencyOnStartup)
+            {
+                EmergencyRadio.IsEnabled = true;
             }
 
             try
@@ -677,8 +722,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         VoicePort = config.VoicePort;
 
         AutoConnect = config.AutoConnect;
-        DeactivateRadiosOnAutoConnect = config.DeactivateRadiosOnAutoConnect;
+        SaveRadioActiveState = config.SaveRadioActiveState;
+        TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup;
+        EnableEmergencyRadio = config.EnableEmergencyRadio;
         DebugLoggingEnabled = config.DebugLoggingEnabled;
+        InputVolume = config.InputVolume;
+        OutputVolume = config.OutputVolume;
 
         // Load bindings into radio panels
         for (int i = 0; i < RadioPanels.Count && i < config.Bindings.Count; i++)
@@ -689,6 +738,28 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             panel.FreqId = binding.FreqId;
             panel.Hotkey = binding.Hotkey;
             panel.Label = string.IsNullOrWhiteSpace(binding.Label) ? panel.Label : binding.Label;
+        }
+
+        // Restore per-radio state (volume, balance, muted, broadcast)
+        foreach (var state in config.RadioStates)
+        {
+            if (state.Index >= 0 && state.Index < RadioPanels.Count)
+            {
+                var panel = RadioPanels[state.Index];
+                panel.Volume = state.Volume;
+                panel.Balance = state.Balance;
+                panel.IsMuted = state.IsMuted;
+                panel.IncludedInBroadcast = state.IncludedInBroadcast;
+            }
+        }
+
+        // Restore emergency radio state
+        if (config.EmergencyRadioState != null)
+        {
+            EmergencyRadio.Volume = config.EmergencyRadioState.Volume;
+            EmergencyRadio.Balance = config.EmergencyRadioState.Balance;
+            EmergencyRadio.IsMuted = config.EmergencyRadioState.IsMuted;
+            EmergencyRadio.IsEnabled = config.EmergencyRadioState.IsEnabled;
         }
 
         Bindings.Clear();
@@ -778,10 +849,34 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.VoicePort = VoicePort;
 
         _config.AutoConnect = AutoConnect;
-        _config.DeactivateRadiosOnAutoConnect = DeactivateRadiosOnAutoConnect;
+        _config.SaveRadioActiveState = SaveRadioActiveState;
+        _config.TurnOnEmergencyOnStartup = TurnOnEmergencyOnStartup;
+        _config.EnableEmergencyRadio = EnableEmergencyRadio;
         _config.DebugLoggingEnabled = DebugLoggingEnabled;
+        _config.InputVolume = InputVolume;
+        _config.OutputVolume = OutputVolume;
 
         _config.Bindings = Bindings.ToList();
+
+        // Save per-radio state
+        _config.RadioStates = RadioPanels.Select(p => new Models.RadioState
+        {
+            Index = p.Index,
+            IsEnabled = p.IsEnabled,
+            IsMuted = p.IsMuted,
+            Volume = p.Volume,
+            Balance = p.Balance,
+            IncludedInBroadcast = p.IncludedInBroadcast
+        }).ToList();
+
+        _config.EmergencyRadioState = new Models.RadioState
+        {
+            Index = -1,
+            IsEnabled = EmergencyRadio.IsEnabled,
+            IsMuted = EmergencyRadio.IsMuted,
+            Volume = EmergencyRadio.Volume,
+            Balance = EmergencyRadio.Balance
+        };
     }
 
     private readonly object _debugLogLock = new();
@@ -890,6 +985,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             // Check Emergency radio
             if (EmergencyRadio != null && EmergencyRadio.FreqId == binding.FreqId && EmergencyRadio.Hotkey == binding.Hotkey)
             {
+                if (!EnableEmergencyRadio)
+                {
+                    StatusText = "Emergency radio is disabled in App Settings";
+                    return;
+                }
                 await HandlePttPressedAsync(EmergencyRadio);
                 return;
             }
@@ -1104,6 +1204,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         // Set output device
         _voice.SetOutputDevice(SelectedAudioOutputDevice);
 
+        // Set master volumes
+        _voice.SetMasterInputVolume(InputVolume / 100f);
+        _voice.SetMasterOutputVolume(OutputVolume / 100f);
+
         await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId);
         IsVoiceConnected = _voice.IsConnected;
 
@@ -1137,7 +1241,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             // Find radio panel matching the frequency
             var matchingRadio = RadioPanels.FirstOrDefault(r => r.IsEnabled && !r.IsMuted && r.FreqId == freqId);
-            if (matchingRadio == null && EnableEmergencyRadio && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
+            if (matchingRadio == null && EnableEmergencyRadio && EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)
             {
                 matchingRadio = EmergencyRadio;
             }
@@ -1188,11 +1292,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_voice == null || !_voice.IsConnected) return;
 
-        bool effectiveMuted = panel.IsMuted;
+        bool effectiveMuted = panel.IsMuted || !panel.IsEnabled;
         if (panel.IsEmergencyRadio)
             effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
-        else
-            effectiveMuted = effectiveMuted || !panel.IsEnabled;
 
         _voice.SetFreqSettings(panel.FreqId, panel.Volume / 100f, panel.Balance / 100f, effectiveMuted);
     }

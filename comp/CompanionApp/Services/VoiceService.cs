@@ -75,6 +75,10 @@ public sealed class VoiceService : IDisposable
     private int _lastCaptureRate = OpusSampleRate;
     private int _lastCaptureChannels = 1;
 
+    // ---- master volume (0.0 – 1.25) ----
+    private float _masterInputVolume = 1.0f;
+    private float _masterOutputVolume = 1.0f;
+
     // ---- TX state ----
     private bool _isTransmitting;
     private int _currentFreqId;
@@ -103,6 +107,16 @@ public sealed class VoiceService : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Set master input (microphone) volume. 0-125 maps to 0.0-1.25.
+    /// </summary>
+    public void SetMasterInputVolume(float volume) => _masterInputVolume = Math.Clamp(volume, 0f, 1.25f);
+
+    /// <summary>
+    /// Set master output (speakers) volume. 0-125 maps to 0.0-1.25.
+    /// </summary>
+    public void SetMasterOutputVolume(float volume) => _masterOutputVolume = Math.Clamp(volume, 0f, 1.25f);
 
     /// <summary>
     /// Set per-frequency audio settings (volume, pan, mute).
@@ -268,6 +282,15 @@ public sealed class VoiceService : IDisposable
                 // Convert bytes to short[]
                 var frameSamples = new short[OpusFrameSamples];
                 Buffer.BlockCopy(frameBytes, 0, frameSamples, 0, frameSizeBytes);
+
+                // Apply master input volume
+                if (Math.Abs(_masterInputVolume - 1.0f) > 0.001f)
+                {
+                    for (int i = 0; i < frameSamples.Length; i++)
+                    {
+                        frameSamples[i] = (short)Math.Clamp(frameSamples[i] * _masterInputVolume, short.MinValue, short.MaxValue);
+                    }
+                }
 
                 // Encode with Opus
                 var encoded = new byte[4000];
@@ -497,7 +520,7 @@ public sealed class VoiceService : IDisposable
         var settings = _freqSettings.GetValueOrDefault(freqId);
         if (settings is { Muted: true }) return;
 
-        float vol = settings?.Volume ?? 1.0f;
+        float vol = (settings?.Volume ?? 1.0f) * _masterOutputVolume;
         float pan = settings?.Pan ?? 0.5f;
 
         int opusLen = length - 8;

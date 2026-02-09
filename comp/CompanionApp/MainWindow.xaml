@@ -5,6 +5,7 @@
         Title="das-KRT Companion" Height="750" Width="950"
         MinHeight="650" MinWidth="850"
         WindowStartupLocation="CenterScreen"
+        Icon="app-icon.ico"
         Background="#1E1E2E">
   <Window.Resources>
     <!-- Dark theme colors -->

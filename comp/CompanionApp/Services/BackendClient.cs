@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -121,6 +122,40 @@ public sealed class BackendClient : IDisposable
 
         using var resp = await _http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// Get frequency → Discord channel name mappings from the server.
+    /// Returns a dictionary of freqId → channelName.
+    /// </summary>
+    public async Task<Dictionary<int, string>> GetFreqNamesAsync()
+    {
+        try
+        {
+            using var resp = await _http.GetAsync("freq/names");
+            if (!resp.IsSuccessStatusCode) return new Dictionary<int, string>();
+
+            var body = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var result = new Dictionary<int, string>();
+
+            if (doc.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in data.EnumerateObject())
+                {
+                    if (int.TryParse(prop.Name, out int freqId))
+                    {
+                        result[freqId] = prop.Value.GetString() ?? "";
+                    }
+                }
+            }
+
+            return result;
+        }
+        catch
+        {
+            return new Dictionary<int, string>();
+        }
     }
 
     public void Dispose()

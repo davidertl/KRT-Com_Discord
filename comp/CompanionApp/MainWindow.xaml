@@ -230,8 +230,13 @@
                     <TextBlock Text="EMERGENCY" FontWeight="Bold" FontSize="14" 
                                Foreground="{StaticResource EmergencyBorder}" Margin="0,0,0,6"/>
                     <Border Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
-                      <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
-                                 Foreground="{StaticResource FreqDisplayText}"/>
+                      <StackPanel>
+                        <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
+                                   Foreground="{StaticResource FreqDisplayText}"/>
+                        <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
+                                   Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                      </StackPanel>
                     </Border>
                   </StackPanel>
 
@@ -330,17 +335,23 @@
                         <!-- Frequency Display -->
                         <Border Grid.Row="1" Background="{StaticResource FreqDisplayBg}" CornerRadius="4" 
                                 Padding="12,8" Margin="0,0,0,8">
-                          <Grid>
-                            <Grid.ColumnDefinitions>
-                              <ColumnDefinition Width="*"/>
-                              <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="{Binding FrequencyDisplay}" 
-                                       FontFamily="Consolas" FontSize="28" FontWeight="Bold"
-                                       Foreground="{StaticResource FreqDisplayText}" VerticalAlignment="Center"/>
-                            <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
-                                     Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
-                          </Grid>
+                          <StackPanel>
+                            <Grid>
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                              </Grid.ColumnDefinitions>
+                              <TextBlock Grid.Column="0" Text="{Binding FrequencyDisplay}" 
+                                         FontFamily="Consolas" FontSize="28" FontWeight="Bold"
+                                         Foreground="{StaticResource FreqDisplayText}" VerticalAlignment="Center"/>
+                              <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
+                                       Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Channel name from Discord (shown when available) -->
+                            <TextBlock Text="{Binding ChannelName}" FontSize="11" FontStyle="Italic"
+                                       Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                          </StackPanel>
                         </Border>
 
                         <!-- Volume and Balance Row -->

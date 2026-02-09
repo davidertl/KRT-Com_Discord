@@ -41,6 +41,8 @@ public sealed class VoiceService : IDisposable
     public event Action<string, string, int, string>? RxStateChanged;
     /// <summary>Raised when a frequency is joined. Args: (freqId, listenerCount)</summary>
     public event Action<int, int>? FreqJoined;
+    /// <summary>Raised when server confirms mute/unmute. Args: (freqId, isMuted)</summary>
+    public event Action<int, bool>? MuteConfirmed;
 
     // ---- connection state ----
     private ClientWebSocket? _ws;
@@ -216,6 +218,28 @@ public sealed class VoiceService : IDisposable
         if (!IsConnected || _ws == null) return;
 
         var msg = new { type = "leave", freqId };
+        await WsSendAsync(msg, _cts!.Token);
+    }
+
+    /// <summary>
+    /// Tell the server to mute a frequency (stop forwarding audio to us).
+    /// </summary>
+    public async Task MuteFrequencyAsync(int freqId)
+    {
+        if (!IsConnected || _ws == null) return;
+
+        var msg = new { type = "mute", freqId };
+        await WsSendAsync(msg, _cts!.Token);
+    }
+
+    /// <summary>
+    /// Tell the server to unmute a frequency (resume forwarding audio to us).
+    /// </summary>
+    public async Task UnmuteFrequencyAsync(int freqId)
+    {
+        if (!IsConnected || _ws == null) return;
+
+        var msg = new { type = "unmute", freqId };
         await WsSendAsync(msg, _cts!.Token);
     }
 
@@ -468,6 +492,12 @@ public sealed class VoiceService : IDisposable
                     var luFreq = root.TryGetProperty("freqId", out var luf) ? luf.GetInt32() : 0;
                     var luCount = root.TryGetProperty("listenerCount", out var luc) ? luc.GetInt32() : 0;
                     FreqJoined?.Invoke(luFreq, luCount);
+                    break;
+
+                case "mute_ok":
+                    var muteFreq = root.TryGetProperty("freqId", out var mf) ? mf.GetInt32() : 0;
+                    var isMuted = root.TryGetProperty("muted", out var mm) && mm.GetBoolean();
+                    MuteConfirmed?.Invoke(muteFreq, isMuted);
                     break;
 
                 case "error":

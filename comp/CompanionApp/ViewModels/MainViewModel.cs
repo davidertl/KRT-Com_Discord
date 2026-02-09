@@ -190,6 +190,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(nameof(EmergencyRadioVisibility));
             MarkGlobalChanged();
             PushRadioSettingsToVoice(EmergencyRadio);
+            _ = PushServerMuteAsync(EmergencyRadio);
+            _ = HandleEmergencyRadioToggleAsync();
         }
     }
 
@@ -268,6 +270,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(nameof(OutputVolumeText));
             MarkGlobalChanged();
             _voice?.SetMasterOutputVolume(_outputVolume / 100f);
+            _beepService?.SetMasterVolume(_outputVolume / 100f);
         }
     }
     public string OutputVolumeText => $"{_outputVolume}%";
@@ -360,6 +363,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         // Initialize beep service
         _beepService = new BeepService();
+        _beepService.SetMasterVolume(_outputVolume / 100f);
 
         // Initialize 8 radio panels with default names
         for (int i = 0; i < 8; i++)
@@ -1083,11 +1087,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // Notify backend of TX start and get listener count (non-fatal if fails)
+            // Notify backend of TX start (non-fatal if fails)
             try
             {
-                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
-                if (listeners >= 0) radio.ListenerCount = listeners;
+                await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
             }
             catch (Exception backendEx)
             {
@@ -1129,8 +1132,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (radio != null && _backend != null)
             {
-                var listeners = await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
-                if (listeners >= 0) radio.ListenerCount = listeners;
+                await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
             }
         }
         catch
@@ -1200,6 +1202,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         };
         _voice.RxStateChanged += OnRxStateChanged;
         _voice.FreqJoined += OnFreqJoined;
+        _voice.MuteConfirmed += OnMuteConfirmed;
         
         // Set output device
         _voice.SetOutputDevice(SelectedAudioOutputDevice);
@@ -1230,9 +1233,39 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (IsVoiceConnected)
         {
             PushAllRadioSettingsToVoice();
+            await PushAllServerMutesAsync();
+            await FetchAndApplyFreqNamesAsync();
         }
 
         LogDebug($"[Voice] ConnectVoiceAsync done: IsConnected={IsVoiceConnected}");
+    }
+
+    /// <summary>
+    /// Fetch frequency → channel name mappings from the server and apply to radio panels.
+    /// </summary>
+    private async Task FetchAndApplyFreqNamesAsync()
+    {
+        if (string.IsNullOrWhiteSpace(ServerBaseUrl)) return;
+        try
+        {
+            using var client = new BackendClient(ServerBaseUrl, AdminToken ?? "");
+            var freqNames = await client.GetFreqNamesAsync();
+            if (freqNames.Count == 0) return;
+
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                foreach (var panel in RadioPanels)
+                {
+                    panel.ChannelName = freqNames.TryGetValue(panel.FreqId, out var name) ? name : "";
+                }
+                EmergencyRadio.ChannelName = freqNames.TryGetValue(EmergencyRadio.FreqId, out var eName) ? eName : "";
+            });
+            LogDebug($"[Voice] Applied {freqNames.Count} freq name mappings");
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"[Voice] Failed to fetch freq names: {ex.Message}");
+        }
     }
     
     private void OnRxStateChanged(string discordUserId, string username, int freqId, string action)
@@ -1285,7 +1318,87 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled")
         {
             PushRadioSettingsToVoice(panel);
+
+            // Send server-side mute/unmute when mute state changes
+            if (e.PropertyName is "IsMuted" or "IsEnabled")
+            {
+                _ = PushServerMuteAsync(panel);
+            }
+
+            // Join/leave freq on server when radio is enabled/disabled (updates listener count for all users)
+            if (e.PropertyName is "IsEnabled")
+            {
+                _ = HandleRadioEnabledChangedAsync(panel);
+            }
         }
+    }
+
+    private async Task HandleRadioEnabledChangedAsync(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        // Emergency radio gating: respect EnableEmergencyRadio setting
+        if (panel.IsEmergencyRadio && !EnableEmergencyRadio) return;
+
+        if (panel.IsEnabled)
+        {
+            await _voice.JoinFrequencyAsync(panel.FreqId);
+            LogDebug($"[Voice] Radio enabled → joined freq {panel.FreqId}");
+        }
+        else
+        {
+            await _voice.LeaveFrequencyAsync(panel.FreqId);
+            LogDebug($"[Voice] Radio disabled → left freq {panel.FreqId}");
+        }
+    }
+
+    private async Task HandleEmergencyRadioToggleAsync()
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        if (EnableEmergencyRadio)
+        {
+            await _voice.JoinFrequencyAsync(EmergencyRadio.FreqId);
+            LogDebug($"[Voice] Emergency radio enabled → joined freq {EmergencyRadio.FreqId}");
+        }
+        else
+        {
+            await _voice.LeaveFrequencyAsync(EmergencyRadio.FreqId);
+            LogDebug($"[Voice] Emergency radio disabled → left freq {EmergencyRadio.FreqId}");
+        }
+    }
+
+    private async Task PushServerMuteAsync(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        bool effectiveMuted = panel.IsMuted || !panel.IsEnabled;
+        if (panel.IsEmergencyRadio)
+            effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
+
+        if (effectiveMuted)
+            await _voice.MuteFrequencyAsync(panel.FreqId);
+        else
+            await _voice.UnmuteFrequencyAsync(panel.FreqId);
+    }
+
+    private async Task PushAllServerMutesAsync()
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+
+        foreach (var panel in RadioPanels)
+        {
+            await PushServerMuteAsync(panel);
+        }
+        await PushServerMuteAsync(EmergencyRadio);
+    }
+
+    private void OnMuteConfirmed(int freqId, bool isMuted)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            LogDebug($"[Voice] Server mute confirmed: freq={freqId} muted={isMuted}");
+        });
     }
 
     private void PushRadioSettingsToVoice(RadioPanelViewModel panel)

@@ -22,7 +22,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
 VERSION="Alpha 0.0.3"
-echo -e "${GREEN}=== das-krt Bootstrap | ${VERSION} ===${NC}"
+echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
 # Variablen
@@ -79,6 +79,10 @@ write_file_backup() {
   chown "$ADMIN_USER:$ADMIN_USER" "$path" 2>/dev/null || true
 }
 
+# ==========================================================
+# PHASE 1: System Dependencies
+# ==========================================================
+
 # --------------------------------------------------
 # Basis-Pakete
 # --------------------------------------------------
@@ -130,10 +134,14 @@ curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
 apt -y install nodejs
 log_ok "Node.js installiert: $(node -v) | npm: $(npm -v)"
 
+# ==========================================================
+# PHASE 2: Project Structure & npm Dependencies
+# ==========================================================
+
 # --------------------------------------------------
 # Projektstruktur
 # --------------------------------------------------
-log_info "[8/10] Lege Projektverzeichnisse an"
+log_info "[7/10] Lege Projektverzeichnisse an"
 mkdir -p "$BACKEND_DIR" "$APP_ROOT/config" "$APP_ROOT/logs" "$SRC_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$APP_ROOT" || true
 log_ok "Projektstruktur bereit: $APP_ROOT"
@@ -141,7 +149,7 @@ log_ok "Projektstruktur bereit: $APP_ROOT"
 # --------------------------------------------------
 # Backend Initialisierung (Dependencies)
 # --------------------------------------------------
-log_info "[9/10] Initialisiere Backend (npm)"
+log_info "[8/10] Initialisiere Backend (npm)"
 cd "$BACKEND_DIR"
 
 if [ ! -f package.json ]; then
@@ -158,7 +166,7 @@ log_ok "npm Dependencies installiert/aktualisiert"
 # --------------------------------------------------
 # systemd Service
 # --------------------------------------------------
-log_info "[10/10] Erstelle/Update systemd Service"
+log_info "[9/10] Erstelle/Update systemd Service"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=das-krt Backend (${VERSION})
@@ -198,11 +206,10 @@ else
   log_ok "channels.json existiert bereits: $CHANNEL_MAP (nicht überschrieben)"
 fi
 
-# --------------------------------------------------
-# Backend Skeleton (Alpha 0.0.2)
-# - TX Events (REST + WS broadcast)
-# - User directory (discord_users)
-# --------------------------------------------------
+# ==========================================================
+# PHASE 3: Backend Source Code Deployment
+# ==========================================================
+log_info "[10/10] Deploye Backend Source Code"
 
 # index.js
 write_file_backup "$BACKEND_DIR/index.js" "$(cat <<'EOF'
@@ -221,6 +228,7 @@ const { createDiscordBot } = require('./src/discord');
 const { createMappingStore } = require('./src/mapping');
 const { createStateStore } = require('./src/state');
 const { createVoiceRelay } = require('./src/voice');
+const { createDsgvo } = require('./src/dsgvo');
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -241,12 +249,21 @@ function mustEnv(name) {
   const txStore = createTxStore(db);
   const usersStore = createUsersStore(db);
 
+  const dsgvo = createDsgvo({
+    db,
+    dsgvoEnabled: process.env.DSGVO_ENABLED === 'true',
+    debugMode: process.env.DEBUG_MODE === 'true',
+  });
+  dsgvo.startScheduler();
+
   const httpServer = createHttpServer({
     db,
     mapping,
     stateStore,
     txStore,
     usersStore,
+    dsgvo,
+    bot: null, // set after bot creation
     adminToken: process.env.ADMIN_TOKEN || '',
     allowedGuildIds: process.env.DISCORD_GUILD_ID
       ? process.env.DISCORD_GUILD_ID.split(',')
@@ -293,7 +310,13 @@ function mustEnv(name) {
     stateStore,
     usersStore,
     onStateChange: (payload) => wsHub.broadcast({ type: 'voice_state', payload }),
+    channelSyncIntervalHours: Number(process.env.CHANNEL_SYNC_INTERVAL_HOURS || 24),
   });
+
+  // Wire bot reference into httpServer for channel sync endpoints
+  if (typeof httpServer._setBot === 'function') {
+    httpServer._setBot(bot);
+  }
 
   httpServer.listen(bindPort, bindHost, async () => {
     console.log(`[http] listening on http://${bindHost}:${bindPort}`);
@@ -487,6 +510,11 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
   // Frequency subscriptions: freqId -> Set<sessionToken>
   const freqSubscribers = new Map();
 
+  // Clean up stale DB rows from a previous crash/restart
+  db.prepare('DELETE FROM freq_listeners').run();
+  db.prepare('DELETE FROM voice_sessions').run();
+  console.log('[voice] Cleaned stale DB sessions on startup');
+
   const wss = new WebSocketServer({ noServer: true });
 
   function start() {
@@ -514,6 +542,12 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
             break;
           case 'leave':
             if (sessionToken) handleLeave(sessionToken, msg);
+            break;
+          case 'mute':
+            if (sessionToken) handleMute(sessionToken, msg);
+            break;
+          case 'unmute':
+            if (sessionToken) handleUnmute(sessionToken, msg);
             break;
           case 'ping':
             if (sessionToken) {
@@ -568,9 +602,10 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
     for (const subToken of subscribers) {
       if (subToken === senderToken) continue;
       const sub = sessions.get(subToken);
-      if (sub && sub.ws && sub.ws.readyState === 1) {
-        sub.ws.send(buf);
-      }
+      if (!sub || !sub.ws || sub.ws.readyState !== 1) continue;
+      // Skip if receiver has muted this frequency
+      if (sub.mutedFreqs.has(freqId)) continue;
+      sub.ws.send(buf);
     }
   }
 
@@ -604,6 +639,7 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
       displayName: user.display_name || String(discordUserId),
       ws,
       frequencies: new Set(),
+      mutedFreqs: new Set(),   // freqIds where this user is RX-muted (server won't forward audio)
       lastSeen: now,
     };
     sessions.set(sessionToken, session);
@@ -698,6 +734,46 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
     }
   }
 
+  function handleMute(sessionToken, msg) {
+    const session = sessions.get(sessionToken);
+    if (!session) return;
+
+    const freqId = Number(msg.freqId);
+    if (!Number.isInteger(freqId) || freqId < 1000 || freqId > 9999) {
+      session.ws.send(JSON.stringify({ type: 'mute_error', reason: 'bad freqId' }));
+      return;
+    }
+
+    session.mutedFreqs.add(freqId);
+    console.log('[voice] Mute freq', freqId, 'by', session.discordUserId);
+
+    session.ws.send(JSON.stringify({
+      type: 'mute_ok',
+      freqId,
+      muted: true,
+    }));
+  }
+
+  function handleUnmute(sessionToken, msg) {
+    const session = sessions.get(sessionToken);
+    if (!session) return;
+
+    const freqId = Number(msg.freqId);
+    if (!Number.isInteger(freqId) || freqId < 1000 || freqId > 9999) {
+      session.ws.send(JSON.stringify({ type: 'mute_error', reason: 'bad freqId' }));
+      return;
+    }
+
+    session.mutedFreqs.delete(freqId);
+    console.log('[voice] Unmute freq', freqId, 'by', session.discordUserId);
+
+    session.ws.send(JSON.stringify({
+      type: 'mute_ok',
+      freqId,
+      muted: false,
+    }));
+  }
+
   function cleanupSession(token) {
     const session = sessions.get(token);
     if (!session) return;
@@ -767,6 +843,19 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [] }) {
       if (sub.discordUserId === discordUserId) continue; // don't echo to sender
       sub.ws.send(msg);
     }
+
+    // On TX stop, broadcast updated listener count to ALL subscribers (including sender)
+    // so everyone sees the correct count after a transmission ends
+    if (action === 'stop') {
+      const listenerCount = subs.size;
+      const luMsg = JSON.stringify({ type: 'listener_update', freqId, listenerCount });
+      for (const subToken of subs) {
+        const sub = sessions.get(subToken);
+        if (sub && sub.ws && sub.ws.readyState === 1) {
+          sub.ws.send(luMsg);
+        }
+      }
+    }
   }
 
   return {
@@ -799,6 +888,7 @@ function createMappingStore(mapPath) {
   let channelNames = new Map();       // channelId -> channelName
   let dynamicMapping = new Map();     // channelId -> freqId (parsed from name)
   let defaultFrequencies = new Set(); // freqIds parsed from Discord channel names (default channels)
+  let freqToName = new Map();         // freqId -> channelName (for client display)
 
   function load() {
     const raw = fs.readFileSync(mapPath, 'utf-8');
@@ -816,6 +906,15 @@ function createMappingStore(mapPath) {
     }
 
     mapping = m;
+
+    // Load channel names from config if present
+    const names = json.channelNames || {};
+    for (const [channelId, name] of Object.entries(names)) {
+      channelNames.set(String(channelId), String(name));
+      // Also populate freqToName from saved config
+      const fId = mapping.get(String(channelId)) ?? dynamicMapping.get(String(channelId));
+      if (fId) freqToName.set(fId, String(name));
+    }
   }
 
   load();
@@ -840,7 +939,36 @@ function createMappingStore(mapPath) {
     if (freqId) {
       dynamicMapping.set(String(channelId), freqId);
       defaultFrequencies.add(freqId);
-      console.log(`[mapping] Registered default freq ${freqId} from channel "${channelName}"`);
+      // Extract display name: remove the "(1050)" suffix and trim
+      const displayName = channelName.replace(/\s*\(\d{4}\)$/, '').trim() || channelName;
+      freqToName.set(freqId, displayName);
+      console.log(`[mapping] Registered default freq ${freqId} from channel "${channelName}" → "${displayName}"`);
+    }
+  }
+
+  // Save current discovered mappings + channel names to channels.json
+  function save() {
+    try {
+      // Merge static + dynamic mappings
+      const merged = {};
+      for (const [chId, fId] of mapping) merged[chId] = fId;
+      for (const [chId, fId] of dynamicMapping) merged[chId] = fId;
+
+      // Channel names
+      const names = {};
+      for (const [chId, name] of channelNames) names[chId] = name;
+
+      const json = {
+        discordChannelToFreqId: merged,
+        channelNames: names,
+      };
+
+      fs.writeFileSync(mapPath, JSON.stringify(json, null, 2), 'utf-8');
+      console.log(`[mapping] Saved ${Object.keys(merged).length} mappings + ${Object.keys(names).length} names to ${mapPath}`);
+      return { mappings: Object.keys(merged).length, names: Object.keys(names).length };
+    } catch (e) {
+      console.error('[mapping] Failed to save:', e.message);
+      throw e;
     }
   }
 
@@ -852,12 +980,22 @@ function createMappingStore(mapPath) {
     },
     // Get channel name by ID
     getChannelName: (channelId) => channelNames.get(String(channelId)) ?? null,
+    // Get display name for a frequency ID (e.g., "testkanal" for freq 1050)
+    getFreqName: (freqId) => freqToName.get(Number(freqId)) ?? null,
+    // Get all freq → name mappings
+    getFreqNames: () => {
+      const result = {};
+      for (const [fId, name] of freqToName) result[fId] = name;
+      return result;
+    },
     // Register channel with name
     registerChannel,
     // Parse freq from name utility
     parseFreqIdFromName,
     // Get all default frequencies (from Discord channel names)
     getDefaultFrequencies: () => [...defaultFrequencies],
+    // Save discovered mappings to disk
+    save,
     reload: () => load(),
     size: () => mapping.size + dynamicMapping.size,
   };
@@ -912,7 +1050,7 @@ write_file_backup "$SRC_DIR/discord.js" "$(cat <<'EOF'
 
 const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
 
-function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onStateChange }) {
+function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onStateChange, channelSyncIntervalHours = 24 }) {
   // Wichtig: "Server Members Intent" muss im Discord Developer Portal aktiviert sein,
   // sonst liefert member teilweise keine Daten.
   const client = new Client({
@@ -922,6 +1060,10 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
       GatewayIntentBits.GuildMembers,
     ],
   });
+
+  let _syncIntervalHours = channelSyncIntervalHours;
+  let _syncHandle = null;
+  let _lastChannelSync = null;
 
   // Scan all voice channels on startup to register frequency IDs from names
   async function scanVoiceChannels() {
@@ -945,9 +1087,41 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     console.log(`[discord] Scanned voice channels, found ${defaultFreqs.length} default frequencies`);
   }
 
+  // Sync all guild members into discord_users on startup
+  async function syncGuildMembers() {
+    if (!usersStore) return;
+    const guilds = guildId
+      ? [client.guilds.cache.get(guildId)].filter(Boolean)
+      : [...client.guilds.cache.values()];
+
+    let count = 0;
+    const now = Date.now();
+    for (const guild of guilds) {
+      try {
+        const members = await guild.members.fetch();
+        for (const [memberId, member] of members) {
+          if (member.user.bot) continue;
+          const displayName = member.nickname || member.displayName || member.user.username;
+          usersStore.upsert({
+            discord_user_id: String(memberId),
+            guild_id: String(guild.id),
+            display_name: String(displayName),
+            updated_at_ms: now,
+          });
+          count++;
+        }
+      } catch (e) {
+        console.error(`[discord] Failed to sync members for guild ${guild.id}:`, e.message);
+      }
+    }
+    console.log(`[discord] Synced ${count} guild members into user directory`);
+  }
+
   client.once('clientReady', async () => {
     console.log(`[discord] logged in as ${client.user?.tag}`);
     await scanVoiceChannels();
+    await syncGuildMembers();
+    startChannelSyncScheduler();
   });
 
   // Listen for channel updates (rename, create, delete)
@@ -960,6 +1134,37 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
   client.on('channelCreate', (channel) => {
     if (channel.type === ChannelType.GuildVoice) {
       mapping.registerChannel(channel.id, channel.name);
+    }
+  });
+
+  // Keep user directory up-to-date when members join or change nickname
+  client.on('guildMemberAdd', (member) => {
+    if (member.user.bot) return;
+    if (guildId && member.guild.id !== guildId) return;
+    if (!usersStore) return;
+    const displayName = member.nickname || member.displayName || member.user.username;
+    usersStore.upsert({
+      discord_user_id: String(member.id),
+      guild_id: String(member.guild.id),
+      display_name: String(displayName),
+      updated_at_ms: Date.now(),
+    });
+    console.log(`[discord] New member added to user directory: ${displayName}`);
+  });
+
+  client.on('guildMemberUpdate', (oldMember, newMember) => {
+    if (newMember.user.bot) return;
+    if (guildId && newMember.guild.id !== guildId) return;
+    if (!usersStore) return;
+    const oldName = oldMember.nickname || oldMember.displayName;
+    const newName = newMember.nickname || newMember.displayName || newMember.user.username;
+    if (oldName !== newName) {
+      usersStore.upsert({
+        discord_user_id: String(newMember.id),
+        guild_id: String(newMember.guild.id),
+        display_name: String(newName),
+        updated_at_ms: Date.now(),
+      });
     }
   });
 
@@ -1011,9 +1216,51 @@ function createDiscordBot({ token, guildId, mapping, stateStore, usersStore, onS
     }
   });
 
+  // --- Channel sync scheduler ---
+  function startChannelSyncScheduler() {
+    if (_syncHandle) clearInterval(_syncHandle);
+    const intervalMs = _syncIntervalHours * 60 * 60 * 1000;
+    _syncHandle = setInterval(async () => {
+      console.log('[discord] Scheduled channel sync...');
+      await triggerChannelSync();
+    }, intervalMs);
+    console.log(`[discord] Channel sync scheduler started (every ${_syncIntervalHours}h)`);
+  }
+
+  async function triggerChannelSync() {
+    try {
+      await scanVoiceChannels();
+      mapping.save();
+      _lastChannelSync = new Date().toISOString();
+      console.log('[discord] Channel sync completed');
+      return { ok: true, lastSync: _lastChannelSync, freqNames: mapping.getFreqNames() };
+    } catch (e) {
+      console.error('[discord] Channel sync failed:', e.message);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  function setSyncInterval(hours) {
+    _syncIntervalHours = Math.max(1, Number(hours) || 24);
+    startChannelSyncScheduler();
+    console.log(`[discord] Sync interval set to ${_syncIntervalHours}h`);
+  }
+
+  function getSyncStatus() {
+    return {
+      intervalHours: _syncIntervalHours,
+      lastSync: _lastChannelSync,
+      schedulerRunning: !!_syncHandle,
+      freqNames: mapping.getFreqNames(),
+    };
+  }
+
   return {
     start: async () => { await client.login(token); },
-    stop: async () => { await client.destroy(); },
+    stop: async () => { clearInterval(_syncHandle); await client.destroy(); },
+    triggerChannelSync,
+    setSyncInterval,
+    getSyncStatus,
   };
 }
 
@@ -1068,6 +1315,194 @@ module.exports = { createWsHub };
 EOF
 )"
 
+# src/dsgvo.js - DSGVO / Privacy compliance module
+write_file_backup "$SRC_DIR/dsgvo.js" "$(cat <<'EOF'
+'use strict';
+
+/**
+ * DSGVO (GDPR) Compliance Module
+ *
+ * - Delete all data for a specific user (discord_user_id)
+ * - Delete all data for a specific guild (guild_id)
+ * - Automatic cleanup of old data (2 days in compliance mode, 7 days in debug mode)
+ * - Debug mode disables automatic cleanup and extends retention to 7 days
+ * - Scheduled task runs every 24 hours
+ */
+function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
+  let _enabled = dsgvoEnabled;
+  let _debugMode = debugMode;
+  let _debugToolActive = false;   // set by external tools to pause auto-cleanup
+  let _lastCleanup = null;
+  let _schedulerHandle = null;
+
+  const RETENTION_NORMAL_MS = 2 * 24 * 60 * 60 * 1000;   // 2 days
+  const RETENTION_DEBUG_MS  = 7 * 24 * 60 * 60 * 1000;   // 7 days
+  const SCHEDULER_INTERVAL  = 24 * 60 * 60 * 1000;        // 24 hours
+
+  /**
+   * Delete all data for a specific Discord user across all tables.
+   */
+  function deleteUser(discordUserId) {
+    const uid = String(discordUserId);
+    const deleted = {
+      voice_state: 0,
+      tx_events: 0,
+      discord_users: 0,
+      freq_listeners: 0,
+      voice_sessions: 0,
+    };
+
+    deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE discord_user_id = ?').run(uid).changes;
+    deleted.tx_events      = db.prepare('DELETE FROM tx_events WHERE discord_user_id = ?').run(uid).changes;
+    deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE discord_user_id = ?').run(uid).changes;
+    deleted.freq_listeners = db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ?').run(uid).changes;
+    deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE discord_user_id = ?').run(uid).changes;
+
+    const total = Object.values(deleted).reduce((a, b) => a + b, 0);
+    console.log(`[dsgvo] Deleted ${total} rows for user ${uid}`, deleted);
+    return { discordUserId: uid, deleted, totalRows: total };
+  }
+
+  /**
+   * Delete all data for a specific guild across all tables.
+   */
+  function deleteGuild(guildId) {
+    const gid = String(guildId);
+    const deleted = {
+      voice_state: 0,
+      discord_users: 0,
+      voice_sessions: 0,
+    };
+
+    deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE guild_id = ?').run(gid).changes;
+    deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE guild_id = ?').run(gid).changes;
+    deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE guild_id = ?').run(gid).changes;
+
+    const total = Object.values(deleted).reduce((a, b) => a + b, 0);
+    console.log(`[dsgvo] Deleted ${total} rows for guild ${gid}`, deleted);
+    return { guildId: gid, deleted, totalRows: total };
+  }
+
+  /**
+   * Run cleanup: delete all data older than retention period.
+   * Returns summary of what was deleted.
+   */
+  function runCleanup() {
+    const retentionMs = _debugMode ? RETENTION_DEBUG_MS : RETENTION_NORMAL_MS;
+    const cutoff = Date.now() - retentionMs;
+    const retentionDays = _debugMode ? 7 : 2;
+
+    const deleted = {
+      voice_state: 0,
+      tx_events: 0,
+      discord_users: 0,
+      voice_sessions: 0,
+    };
+
+    deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE updated_at_ms < ?').run(cutoff).changes;
+    deleted.tx_events      = db.prepare('DELETE FROM tx_events WHERE ts_ms < ?').run(cutoff).changes;
+    deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE updated_at_ms < ?').run(cutoff).changes;
+    deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE last_seen_ms < ?').run(cutoff).changes;
+
+    const total = Object.values(deleted).reduce((a, b) => a + b, 0);
+    _lastCleanup = new Date().toISOString();
+
+    console.log(`[dsgvo] Cleanup: deleted ${total} rows older than ${retentionDays} days`, deleted);
+    return { deleted, totalRows: total, retentionDays, cutoffTs: cutoff, lastCleanup: _lastCleanup };
+  }
+
+  /**
+   * Scheduled auto-cleanup (runs every 24h if DSGVO is enabled).
+   */
+  function scheduledCleanup() {
+    if (!_enabled) {
+      console.log('[dsgvo] Scheduled cleanup skipped: DSGVO compliance mode disabled');
+      return;
+    }
+    if (_debugToolActive) {
+      console.log('[dsgvo] Scheduled cleanup skipped: debug tool is active');
+      return;
+    }
+    console.log('[dsgvo] Running scheduled cleanup...');
+    runCleanup();
+  }
+
+  function startScheduler() {
+    if (_schedulerHandle) return;
+    _schedulerHandle = setInterval(scheduledCleanup, SCHEDULER_INTERVAL);
+    console.log(`[dsgvo] Scheduler started (every 24h). Enabled=${_enabled}, DebugMode=${_debugMode}`);
+  }
+
+  function stopScheduler() {
+    if (_schedulerHandle) {
+      clearInterval(_schedulerHandle);
+      _schedulerHandle = null;
+    }
+  }
+
+  function setEnabled(enabled) {
+    _enabled = !!enabled;
+    console.log(`[dsgvo] Compliance mode ${_enabled ? 'ENABLED' : 'DISABLED'}`);
+  }
+
+  function setDebugMode(enabled) {
+    _debugMode = !!enabled;
+    if (_debugMode) {
+      _enabled = false;
+      console.log('[dsgvo] Debug mode ENABLED — DSGVO compliance mode auto-disabled, retention extended to 7 days');
+    } else {
+      console.log('[dsgvo] Debug mode DISABLED');
+    }
+  }
+
+  function setDebugToolActive(active) {
+    _debugToolActive = !!active;
+    if (_debugToolActive) {
+      console.log('[dsgvo] Debug tool active — automatic cleanup paused');
+    }
+  }
+
+  function getStatus() {
+    const warnings = [];
+    if (!_enabled) {
+      if (_debugMode) {
+        warnings.push('DSGVO compliance mode is DISABLED because debug mode is active');
+      } else {
+        warnings.push('DSGVO compliance mode is DISABLED — user data will NOT be auto-deleted');
+      }
+    }
+    if (_debugToolActive) {
+      warnings.push('A debug tool is currently active — automatic cleanup is paused');
+    }
+
+    return {
+      dsgvoEnabled: _enabled,
+      debugMode: _debugMode,
+      debugToolActive: _debugToolActive,
+      retentionDays: _debugMode ? 7 : 2,
+      schedulerRunning: !!_schedulerHandle,
+      lastCleanup: _lastCleanup,
+      warnings,
+    };
+  }
+
+  return {
+    deleteUser,
+    deleteGuild,
+    runCleanup,
+    startScheduler,
+    stopScheduler,
+    setEnabled,
+    setDebugMode,
+    setDebugToolActive,
+    getStatus,
+  };
+}
+
+module.exports = { createDsgvo };
+EOF
+)"
+
 # src/http.js
 write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 'use strict';
@@ -1075,11 +1510,12 @@ write_file_backup "$SRC_DIR/http.js" "$(cat <<'EOF'
 const express = require('express');
 const http = require('http');
 
-function createHttpServer({ db, mapping, stateStore, txStore, usersStore, adminToken, allowedGuildIds }) {
+function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo, bot, adminToken, allowedGuildIds }) {
   const app = express();
   app.use(express.json());
 
   let onTxEventFn = null;
+  let _bot = bot;
 
   app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -1199,8 +1635,118 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, adminT
     res.json({ ok: true, mappingSize: mapping.size() });
   });
 
+  // --- DSGVO / Privacy compliance endpoints ---
+
+  // Helper: admin auth check
+  function requireAdmin(req, res) {
+    const token = req.header('x-admin-token') || '';
+    if (!adminToken || token !== adminToken) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return false;
+    }
+    return true;
+  }
+
+  // Get DSGVO status
+  app.get('/admin/dsgvo/status', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ ok: true, data: dsgvo.getStatus() });
+  });
+
+  // Enable/disable DSGVO compliance mode
+  app.post('/admin/dsgvo/toggle', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'missing boolean "enabled"' });
+    }
+    dsgvo.setEnabled(enabled);
+    res.json({ ok: true, data: dsgvo.getStatus() });
+  });
+
+  // Enable/disable debug mode
+  app.post('/admin/dsgvo/debug', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'missing boolean "enabled"' });
+    }
+    dsgvo.setDebugMode(enabled);
+    res.json({ ok: true, data: dsgvo.getStatus() });
+  });
+
+  // Delete all data for a specific user
+  app.post('/admin/dsgvo/delete-user', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { discordUserId } = req.body || {};
+    if (!discordUserId) {
+      return res.status(400).json({ ok: false, error: 'missing discordUserId' });
+    }
+    const result = dsgvo.deleteUser(String(discordUserId));
+    res.json({ ok: true, data: result });
+  });
+
+  // Delete all data for a specific guild
+  app.post('/admin/dsgvo/delete-guild', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { guildId } = req.body || {};
+    if (!guildId) {
+      return res.status(400).json({ ok: false, error: 'missing guildId' });
+    }
+    const result = dsgvo.deleteGuild(String(guildId));
+    res.json({ ok: true, data: result });
+  });
+
+  // Manually trigger DSGVO cleanup
+  app.post('/admin/dsgvo/cleanup', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const result = dsgvo.runCleanup();
+    res.json({ ok: true, data: result });
+  });
+
+  // --- Channel sync endpoints ---
+
+  // Get frequency → channel name mappings (public, no auth required)
+  app.get('/freq/names', (req, res) => {
+    res.json({ ok: true, data: mapping.getFreqNames() });
+  });
+
+  // Get channel sync status
+  app.get('/admin/channel-sync/status', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    if (!_bot || !_bot.getSyncStatus) {
+      return res.status(500).json({ ok: false, error: 'bot not available' });
+    }
+    res.json({ ok: true, data: _bot.getSyncStatus() });
+  });
+
+  // Trigger manual channel sync
+  app.post('/admin/channel-sync/trigger', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    if (!_bot || !_bot.triggerChannelSync) {
+      return res.status(500).json({ ok: false, error: 'bot not available' });
+    }
+    const result = await _bot.triggerChannelSync();
+    res.json({ ok: true, data: result });
+  });
+
+  // Set channel sync interval
+  app.post('/admin/channel-sync/interval', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    if (!_bot || !_bot.setSyncInterval) {
+      return res.status(500).json({ ok: false, error: 'bot not available' });
+    }
+    const { hours } = req.body || {};
+    if (!hours || typeof hours !== 'number' || hours < 1) {
+      return res.status(400).json({ ok: false, error: 'missing or invalid "hours" (min 1)' });
+    }
+    _bot.setSyncInterval(hours);
+    res.json({ ok: true, data: _bot.getSyncStatus() });
+  });
+
   const server = http.createServer(app);
   server._setOnTxEvent = (fn) => { onTxEventFn = fn; };
+  server._setBot = (b) => { _bot = b; };
   return server;
 }
 
@@ -1210,6 +1756,10 @@ EOF
 
 # Ensure ownership for backend dir (best-effort)
 chown -R "$ADMIN_USER:$ADMIN_USER" "$BACKEND_DIR" 2>/dev/null || true
+
+# ==========================================================
+# PHASE 4: .env Configuration & Validation
+# ==========================================================
 
 # --------------------------------------------------
 # Interaktive .env Konfiguration
@@ -1243,6 +1793,13 @@ DB_PATH=$BACKEND_DIR/state.sqlite
 CHANNEL_MAP_PATH=$CHANNEL_MAP
 
 ADMIN_TOKEN=$ADMIN_TOKEN
+
+# DSGVO compliance mode: auto-delete user data older than 2 days (7 in debug mode)
+DSGVO_ENABLED=false
+DEBUG_MODE=false
+
+# Channel sync: how often to re-scan Discord channels for freq mappings (in hours)
+CHANNEL_SYNC_INTERVAL_HOURS=24
 EOF
 
   chown "$ADMIN_USER:$ADMIN_USER" "$ENV_FILE" || true
@@ -1265,6 +1822,7 @@ REQUIRED_FILES=(
   "$SRC_DIR/tx.js"
   "$SRC_DIR/users.js"
   "$SRC_DIR/voice.js"
+  "$SRC_DIR/dsgvo.js"
   "$BACKEND_DIR/index.js"
 )
 
@@ -1311,94 +1869,8 @@ systemctl restart das-krt-backend
 systemctl status das-krt-backend --no-pager || true
 
 echo ""
-log_ok "Bootstrap abgeschlossen | ${VERSION}"
+log_ok "Installation abgeschlossen | ${VERSION}"
 echo ""
-
-# --------------------------------------------------
-# Menü (Wizard)
-# --------------------------------------------------
-while true; do
-  echo ""
-  log_input "=== das-krt Menü (${VERSION}) ==="
-  echo -e "${CYAN}1) channels.json bearbeiten${NC}"
-  echo -e "${CYAN}2) Backend Healthcheck testen${NC}"
-  echo -e "${CYAN}3) Backend Testlog anzeigen (tail)${NC}"
-  echo -e "${CYAN}4) Backend Live-Logs verfolgen (journalctl -f)${NC}"
-  echo -e "${CYAN}5) TX Event senden (start/stop)${NC}"
-  echo -e "${CYAN}6) TX Recent anzeigen${NC}"
-  echo -e "${CYAN}7) Users Recent anzeigen${NC}"
-  echo -e "${CYAN}0) Beenden${NC}"
-  echo ""
-
-  read -r -p "$(echo -e "${CYAN}Auswahl [0-7]: ${NC}")" CHOICE
-
-  case "$CHOICE" in
-    1)
-      log_input "Öffne: $CHANNEL_MAP"
-      nano "$CHANNEL_MAP"
-
-      ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
-      if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
-        if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
-          log_ok "channels.json neu geladen (/admin/reload)"
-        else
-          log_warn "Reload fehlgeschlagen – starte Backend neu"
-          systemctl restart das-krt-backend
-          log_ok "Backend neu gestartet (Mapping neu geladen)"
-        fi
-      else
-        log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
-        systemctl restart das-krt-backend
-        log_ok "Backend neu gestartet (Mapping neu geladen)"
-      fi
-      ;;
-    2)
-      log_info "Healthcheck: http://127.0.0.1:3000/health"
-      if curl -sf "http://127.0.0.1:3000/health" > /dev/null; then
-        log_ok "Healthcheck OK"
-      else
-        log_error "Healthcheck fehlgeschlagen"
-      fi
-      ;;
-    3)
-      log_info "Testlog (letzte 200 Zeilen): $TEST_LOG"
-      tail -n 200 "$TEST_LOG" || true
-      ;;
-    4)
-      log_info "Live Logs: journalctl -u das-krt-backend -f"
-      journalctl -u das-krt-backend -f
-      ;;
-    5)
-      log_input "TX Event senden"
-      read -r -p "$(echo -e "${CYAN}freqId [1060]: ${NC}")" FREQ_ID_IN
-      FREQ_ID_IN="${FREQ_ID_IN:-1060}"
-      read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" ACTION_IN
-      ACTION_IN="${ACTION_IN:-start}"
-
-      if curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
-        -H "content-type: application/json" \
-        -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"${ACTION_IN}\"}" >/dev/null; then
-        log_ok "TX Event gesendet"
-      else
-        log_error "TX Event fehlgeschlagen"
-      fi
-      ;;
-    6)
-      log_info "TX Recent: http://127.0.0.1:3000/tx/recent?limit=10"
-      curl -sS "http://127.0.0.1:3000/tx/recent?limit=10" || true
-      echo ""
-      ;;
-    7)
-      log_info "Users Recent: http://127.0.0.1:3000/users/recent?limit=10"
-      curl -sS "http://127.0.0.1:3000/users/recent?limit=10" || true
-      echo ""
-      ;;
-    0)
-      log_ok "Bye."
-      break
-      ;;
-    *)
-      log_warn "Ungültige Auswahl."
-      ;;
-  esac
-done
+log_info "Verwende service.sh für Start/Stop/Restart und Tools:"
+log_info "  bash service.sh start|stop|restart|status|menu"
+echo ""

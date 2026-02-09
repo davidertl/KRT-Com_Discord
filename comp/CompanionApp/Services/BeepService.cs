@@ -14,6 +14,7 @@ public class BeepService : IDisposable
     private WasapiOut? _waveOut;
     private string _outputDeviceName = "Default";
     private bool _enabled = true;
+    private float _masterVolume = 1.0f;
 
     // Beep frequencies and durations
     private const int TxStartFreq = 800;      // Hz
@@ -31,6 +32,11 @@ public class BeepService : IDisposable
     public void SetOutputDevice(string deviceName)
     {
         _outputDeviceName = deviceName;
+    }
+
+    public void SetMasterVolume(float volume)
+    {
+        _masterVolume = Math.Clamp(volume, 0f, 1.25f);
     }
 
     public void PlayTxStartBeep()
@@ -135,7 +141,7 @@ public class BeepService : IDisposable
 
             var volumeProvider = new VolumeSampleProvider(provider.ToSampleProvider())
             {
-                Volume = 0.5f
+                Volume = 0.5f * _masterVolume
             };
 
             // Find the output device

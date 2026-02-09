@@ -1,2 +1,0 @@
--ingame overlay wer zulezt auf welcher Frequenz gefunkt hat. 
-    -optional mit Rang

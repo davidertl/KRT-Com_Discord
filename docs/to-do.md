@@ -1,15 +1,18 @@
 # High priority:
-
-# Medium priority: 
-
-# Low priority:
-
 (✔) make the tx and rx beep of emergency radio more signficant, so that it is clear that the emergency radio is active. maybe also add a visual indicator in the companion app.
   > FIXED: Emergency beeps redesigned — TX start: ascending 3-tone siren (1200→1500→1800 Hz) with boosted volume (0.55–0.6). TX end: descending 3-tone (1500→1200→900 Hz). RX: rapid triple-pulse (1600→1600→1800 Hz). All emergency tones ~2x louder than regular beeps. PlayBeep now accepts optional volumeMultiplier param.
 (✔) add a recent to the emergency radio - when sending an emergency call (ptt on Emergency Radio) it should show in the companion app who sent the call and which frequency he is active on. max display 911 and max 3 other radio id's (if the user who is sending the emergency call is active on more than 3 frequencies, then just show the 3 most active ones).
 On emergendy radio in the ui the calling person should be highlighted in the black window on the right hand side of the green Channel-ID-Display.
   > FIXED: Emergency radio panel now has a black recent-callers display (#111111 background) right of the frequency display. Shows "Recent:" header in red + last 3 callers in orange (#FF6644, bold). Uses existing RecentTransmissions/AddTransmission infrastructure from RadioPanelViewModel. MinWidth 140px. 
+-> it still does not show the frequencys on which the caller is active, but it shows the caller's name
+(✔) WebSocket /voice returns 403 — DSGVO HTTPS enforcement blocks WebSocket upgrades through Traefik
+  > FIXED: Three issues resolved:
+  > 1. Traefik routes.yml was empty (missing router rules, service URL, middleware config) — now generates complete config with Host rule, certResolver, loadBalancer pointing to backend port.
+  > 2. Traefik traefik.yml had incomplete ACME config (missing email, storage, httpChallenge) and no HTTP→HTTPS redirect — now fully configured.
+  > 3. index.js upgrade handler DSGVO check didn't properly detect HTTPS from Traefik — now checks X-Forwarded-Proto only from loopback connections (Traefik). Same fix applied to http.js Express middleware.
+# Medium priority: 
 
+# Low priority:
 -ingame overlay wer zuletzt auf welcher Frequenz gefunkt hat. 
     -essentiell mit on/off toggle im "App Settings" Tab
     -frage bitte bevor du dieses Projekt anfängst nach deutlichen Instruktionen. 
@@ -60,5 +63,18 @@ Security:
     > FIXED: ConnectVoiceAsync LogDebug no longer logs userId or guildId. Only host and port are logged.
   (✔) Command injection risk in install.sh interactive menu (user input interpolated into curl -d JSON).
     > FIXED: Added json_escape() helper to service.sh (escapes backslashes, quotes, control chars). Applied to all user-input curl -d payloads: delete-user, delete-guild, ban, unban, delete-and-ban, TX event action. Numeric inputs (freqId, hours) validated with regex before use.
+
+# To-Do / Changelog
+
+## Fixed (Alpha 0.0.4 patch)
+
+- [x] **Voice WebSocket 403 error when DSGVO enabled**: The server-side DSGVO HTTPS enforcement for WebSocket upgrades now correctly reads `X-Forwarded-Proto` from Traefik (loopback connections). Previously all WS upgrades were rejected because the header value wasn't being parsed properly (comma-separated values, missing `.split(',')[0].trim()`).
+- [x] **Voice WebSocket URI with redundant port 443**: The companion app no longer appends `:443` when connecting via `wss://` (default port), preventing potential proxy issues.
+
+## Open
+
+- [ ] Reconnect logic: auto-reconnect voice WebSocket on disconnect without requiring PTT press
+- [ ] Connection pooling: keep a single voice connection alive across PTT presses instead of connecting per-press
+- [ ] service.sh: fix `show_dsgvo_warnings` — dangling `fi` without matching `if`
 
 

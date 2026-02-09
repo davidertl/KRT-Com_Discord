@@ -168,7 +168,11 @@ public sealed class VoiceService : IDisposable
             .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
             .TrimEnd('/');
 
-        var wsUri = new Uri($"{scheme}://{cleanHost}:{wsPort}/voice");
+        // Don't append port if it's the default for the scheme (443 for wss, 80 for ws)
+        bool isDefaultPort = (scheme == "wss" && wsPort == 443) || (scheme == "ws" && wsPort == 80);
+        var wsUri = isDefaultPort
+            ? new Uri($"{scheme}://{cleanHost}/voice")
+            : new Uri($"{scheme}://{cleanHost}:{wsPort}/voice");
         Status($"Connecting to {wsUri} ...");
 
         try

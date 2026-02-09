@@ -135,12 +135,7 @@ show_dsgvo_warnings() {
   DEBUG_TOOL="$(echo "$RESPONSE" | grep -o '"debugToolActive":[a-z]*' | cut -d: -f2 || true)"
 
   if [ "$ENABLED" = "false" ]; then
-    echo ""
-    if [ "$DEBUG_ON" = "true" ]; then
-      log_warn "DSGVO Compliance Modus ist DEAKTIVIERT (Debug-Modus aktiv)"
-    else
-      log_warn "DSGVO Compliance Modus ist DEAKTIVIERT — Userdaten werden NICHT automatisch gelöscht"
-    fi
+    log_warn "DSGVO Compliance Mode ist DEAKTIVIERT — Daten werden NICHT automatisch gelöscht"
   fi
   if [ "$DEBUG_TOOL" = "true" ]; then
     log_warn "Ein Debug-Tool ist aktiv — automatisches Cleanup ist pausiert"
@@ -409,7 +404,7 @@ do_channel_sync_interval() {
 
   # Validate numeric input
   if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -lt 1 ]; then
-    log_error "Ung\u00fcltige Eingabe: '$HOURS' (muss eine Zahl >= 1 sein)"
+    log_error "Ungültige Eingabe: '$HOURS' (muss eine Zahl >= 1 sein)"
     return
   fi
 

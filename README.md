@@ -3,7 +3,8 @@
 KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
 **Status:** Alpha 0.0.5  
-**Nächster Fokus:** Rate-Limiting & verbleibende Security-Härtung
+
+Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr verfügbar. Da das Plugin mit Teamspeak wirklich fantastisch funktioniert hat, wollte ich eine ähnliche Lösung für Discord schaffen. Das Projekt ist komplett Open Source und wird von mir in meiner Freizeit entwickelt. Es ist kostenlos, frei verfügbar und soll es auch bleiben.
 
 ---
 
@@ -219,3 +220,11 @@ SQLite (WAL Mode) mit folgendem Schema:
 - [ ] Externe Statusanzeige (Web-Interface)
 - [ ] Under-Attack-Mode (Automatisierte Abwehr)
 - [ ] Multi-Guild Support (aktuell auf eine Guild limitiert)
+
+---
+
+## Lizenz
+
+Dieses Projekt steht unter der [Apache License 2.0](LICENSE).  
+**Jede kommerzielle Nutzung (Geld verdienen mit dieser Software) erfordert eine separate Genehmigung.**  
+Siehe [COMMERCIAL_HOSTING_POLICY.md](COMMERCIAL_HOSTING_POLICY.md) für Details.

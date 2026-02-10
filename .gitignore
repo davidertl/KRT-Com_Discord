@@ -6,3 +6,7 @@ node_modules
 *.temp.*
 .temp
 to-do.md
+
+# .NET build artifacts
+**/bin/
+**/obj/

@@ -86,6 +86,10 @@ public sealed class VoiceService : IDisposable
     private int _currentFreqId;
     private uint _txSequence;
 
+    // ---- heartbeat / pong tracking ----
+    private long _lastPongTicks = 0;
+    private const int PongTimeoutSeconds = 30;
+
     // ---- connection info ----
     private string _host = "";
     private int _wsPort = 3000;
@@ -462,6 +466,7 @@ public sealed class VoiceService : IDisposable
             switch (type)
             {
                 case "auth_ok":
+                    _lastPongTicks = DateTime.UtcNow.Ticks;
                     _sessionToken = root.TryGetProperty("sessionToken", out var st) ? st.GetString() ?? "" : "";
 
                     // Set up audio send channel for binary WS frames
@@ -514,6 +519,10 @@ public sealed class VoiceService : IDisposable
                     var muteFreq = root.TryGetProperty("freqId", out var mf) ? mf.GetInt32() : 0;
                     var isMuted = root.TryGetProperty("muted", out var mm) && mm.GetBoolean();
                     MuteConfirmed?.Invoke(muteFreq, isMuted);
+                    break;
+
+                case "pong":
+                    _lastPongTicks = DateTime.UtcNow.Ticks;
                     break;
 
                 case "error":
@@ -740,6 +749,21 @@ public sealed class VoiceService : IDisposable
             while (!ct.IsCancellationRequested && IsConnected)
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), ct);
+
+                // Check if last pong is stale
+                var elapsed = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastPongTicks));
+                if (elapsed.TotalSeconds > PongTimeoutSeconds)
+                {
+                    Status("Heartbeat timeout — no pong received, reconnecting...");
+                    _ = Task.Run(async () =>
+                    {
+                        await DisconnectAsync();
+                        try { await ConnectAsync(_host, _wsPort, _discordUserId, _guildId, _authToken); }
+                        catch { }
+                    });
+                    return;
+                }
+
                 await WsSendAsync(new { type = "ping" }, ct);
             }
         }

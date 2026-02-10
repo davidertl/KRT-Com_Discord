@@ -267,8 +267,10 @@ public sealed class BackendClient : IDisposable
         if (!string.IsNullOrWhiteSpace(_adminToken))
         {
             req.Headers.Add("x-admin-token", _adminToken);
+        }        if (!string.IsNullOrWhiteSpace(_authToken))
+        {
+            req.Headers.Add("Authorization", $"Bearer {_authToken}");
         }
-
         using var resp = await _http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
 
@@ -285,8 +287,10 @@ public sealed class BackendClient : IDisposable
         using var req = new HttpRequestMessage(HttpMethod.Post, "freq/join")
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
-        using var resp = await _http.SendAsync(req);
+        };        if (!string.IsNullOrWhiteSpace(_authToken))
+        {
+            req.Headers.Add("Authorization", $"Bearer {_authToken}");
+        }        using var resp = await _http.SendAsync(req);
         if (!resp.IsSuccessStatusCode) return -1;
         return await ParseListenerCount(resp);
     }
@@ -301,8 +305,10 @@ public sealed class BackendClient : IDisposable
         using var req = new HttpRequestMessage(HttpMethod.Post, "freq/leave")
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
-        using var resp = await _http.SendAsync(req);
+        };        if (!string.IsNullOrWhiteSpace(_authToken))
+        {
+            req.Headers.Add("Authorization", $"Bearer {_authToken}");
+        }        using var resp = await _http.SendAsync(req);
         if (!resp.IsSuccessStatusCode) return -1;
         return await ParseListenerCount(resp);
     }

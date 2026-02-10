@@ -31,16 +31,16 @@ Security:
     > Partial Fix: Auth endpoints require signed token (Bearer header). Public endpoints limited to /server-status and /privacy-policy. Admin endpoints require x-admin-token. Freq/TX endpoints still use self-reported identity.
   
   High:
-  - ws WebSocket hub has no authentication.
-    > Still open.
-  -No rate limiting on any HTTP endpoint or WebSocket auth.
-    > Still open.
-  -No concurrent session limit per user.
-    > Still open.
-  -No CORS policy on Express server.
-    > Still open.
-  -No WebSocket origin checking on voice.js or ws.js.
-    > Still open.
+  - (✓) ws WebSocket hub has no authentication.
+    > FIXED: /ws hub now requires a valid auth token in query string (?token=...). Connections without valid token are closed with code 4001. Function signature updated to accept tokenSecret.
+  - (✓) No rate limiting on any HTTP endpoint or WebSocket auth.
+    > FIXED: Global rate limiter (200 req / 15 min) added via express-rate-limit. Auth-specific rate limiter (10 req / 1 min) applied to /auth/login, /auth/discord/redirect, /auth/discord/poll.
+  - (✓) No concurrent session limit per user.
+    > FIXED: Voice relay handleAuth now limits to 3 concurrent sessions per discordUserId. Excess connections receive auth_error "too many concurrent sessions".
+  - (✓) No CORS policy on Express server.
+    > FIXED: CORS middleware added — rejects requests with browser Origin header (desktop app has no Origin). Allows non-browser clients.
+  - (✓) No WebSocket origin checking on voice.js or ws.js.
+    > FIXED: WebSocket upgrade handler rejects connections that include a browser Origin header (403 Forbidden + socket.destroy).
   
   Medium:
   -Discord bot token in plaintext .env file (permissions 600 is OK but still cleartext).
@@ -48,15 +48,12 @@ Security:
     > Still open.
 
   -Session tokens stored unhashed in SQLite voice_sessions table.
-  -/freq/join and /freq/leave missing freqId range validation (1000-9999).
-  -limit query parameter not sanitized against NaN.
-  -No Express security headers (helmet middleware missing).
-  -Server logs expose user PII (Discord IDs, display names).
-
-
-
-
-  Low:
+  - (✓) /freq/join and /freq/leave missing freqId range validation (1000-9999).
+    > FIXED: Both REST routes and voice relay handleJoin validate freqId as integer in range 1000-9999. Out-of-range values return 400 Bad Request.
+  - (✓) limit query parameter not sanitized against NaN.
+    > FIXED: All 4 occurrences (GET /admin/log, /admin/freqs, /admin/bans, /admin/users) now use parseInt + Number.isFinite with fallback defaults.
+  - (✓) No Express security headers (helmet middleware missing).
+    > FIXED: helmet() middleware added to Express app for security headers (X-Content-Type-Options, X-Frame-Options, etc.).
   (✔) Client VoiceHost/VoicePort not validated before use.
     > FIXED: VoiceService.ConnectAsync now validates host (non-empty) and port (1–65535) with ArgumentException/ArgumentOutOfRangeException before connecting.
   (✔) Debug log writes sensitive connection parameters in plaintext.
@@ -70,6 +67,20 @@ Security:
 
 - [x] **Voice WebSocket 403 error when DSGVO enabled**: The server-side DSGVO HTTPS enforcement for WebSocket upgrades now correctly reads `X-Forwarded-Proto` from Traefik (loopback connections). Previously all WS upgrades were rejected because the header value wasn't being parsed properly (comma-separated values, missing `.split(',')[0].trim()`).
 - [x] **Voice WebSocket URI with redundant port 443**: The companion app no longer appends `:443` when connecting via `wss://` (default port), preventing potential proxy issues.
+- [x] **Testlauf logic bug**: Fixed broken if/else structure and duplicate `log_ok` call in install.sh test-run logic.
+- [x] **limit NaN bugs (4x)**: All `limit` query params in admin endpoints now use `parseInt` + `Number.isFinite` with safe defaults.
+- [x] **admin/bans syntax error**: Removed errant `{}` that caused handler body to run outside its closure.
+- [x] **admin/ban undefined `kicked`**: Added `_voiceRelay.kickUser()` call before referencing result.
+- [x] **admin/dsgvo/delete-and-ban undefined `kicked`**: Same fix applied.
+- [x] **admin/log-level double response**: Removed premature `res.json()`, added proper success response.
+- [x] **freqId range validation**: REST routes `/freq/join` and `/freq/leave` now validate 1000–9999.
+- [x] **Security middleware**: Added `helmet`, `cors`, `express-rate-limit` npm deps; helmet headers, CORS rejection policy, global + auth rate limiters.
+- [x] **WebSocket origin check**: Upgrade handler rejects connections with browser Origin header.
+- [x] **/ws hub authentication**: State WebSocket now requires valid token in query string.
+- [x] **Concurrent session limit**: Voice relay caps 3 sessions per user.
+- [x] **ConfigService race condition**: Replaced TOCTOU check-then-move with try-move-catch for config folder migration.
+- [x] **VoiceService pong validation**: Heartbeat loop now tracks last pong timestamp and reconnects after 30s timeout.
+- [x] **.gitignore**: Added `**/bin/` and `**/obj/` patterns for .NET build artifacts.
 
 ## Open
 

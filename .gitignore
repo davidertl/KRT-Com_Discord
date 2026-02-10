@@ -10,3 +10,21 @@ to-do.md
 # .NET build artifacts
 **/bin/
 **/obj/
+*.user
+*.suo
+*.cache
+*.baml
+*.g.cs
+*.g.resources
+*.sourcelink.json
+*.AssemblyInfo.cs
+*.AssemblyInfoInputs.cache
+*.GeneratedMSBuildEditorConfig.editorconfig
+*.GlobalUsings.g.cs
+*.FileListAbsolute.txt
+*.nuget.*
+project.assets.json
+
+# Misc
+Thumbs.db
+*.log

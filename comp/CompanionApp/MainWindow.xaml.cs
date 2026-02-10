@@ -22,6 +22,11 @@ public partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await _vm.InitializeAsync();
+
+        if (_vm.StartMinimized)
+        {
+            WindowState = WindowState.Minimized;
+        }
     }
 
     private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)

@@ -80,6 +80,8 @@ public static class ConfigService
             AuthToken = string.IsNullOrEmpty(config.AuthToken) ? "" : ProtectString(config.AuthToken),
             AcceptedPolicyVersion = config.AcceptedPolicyVersion,
             AutoConnect = config.AutoConnect,
+            StartMinimized = config.StartMinimized,
+            LaunchOnStartup = config.LaunchOnStartup,
             SaveRadioActiveState = config.SaveRadioActiveState,
             TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup,
             DebugLoggingEnabled = config.DebugLoggingEnabled,

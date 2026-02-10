@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using Microsoft.Win32;
 using NAudio.CoreAudioApi;
 using CompanionApp.Models;
 using CompanionApp.Services;
@@ -272,14 +273,27 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public bool StartMinimized
     {
         get => _startMinimized;
-        set { _startMinimized = value; OnPropertyChanged(); }
+        set
+        {
+            if (_startMinimized == value) return;
+            _startMinimized = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+        }
     }
 
     private bool _launchOnStartup;
     public bool LaunchOnStartup
     {
         get => _launchOnStartup;
-        set { _launchOnStartup = value; OnPropertyChanged(); }
+        set
+        {
+            if (_launchOnStartup == value) return;
+            _launchOnStartup = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+            ApplyLaunchOnStartupSetting();
+        }
     }
 
     private bool _playPttBeep = true;
@@ -641,6 +655,37 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             Arguments = folder,
             UseShellExecute = true
         });
+    }
+
+    private void ApplyLaunchOnStartupSetting()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", writable: true);
+            if (key == null)
+            {
+                StatusText = "Could not access startup registry key";
+                return;
+            }
+
+            if (LaunchOnStartup)
+            {
+                var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(exePath))
+                {
+                    key.SetValue("KRTComDiscord", "\"" + exePath + "\"");
+                }
+            }
+            else
+            {
+                key.DeleteValue("KRTComDiscord", false);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Startup setting failed: {ex.Message}";
+            LogDebug($"[Startup] Failed to set LaunchOnStartup={LaunchOnStartup}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -1074,6 +1119,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _acceptedPolicyVersion = config.AcceptedPolicyVersion;
 
         AutoConnect = config.AutoConnect;
+        StartMinimized = config.StartMinimized;
+        _launchOnStartup = config.LaunchOnStartup;
+        OnPropertyChanged(nameof(LaunchOnStartup));
         SaveRadioActiveState = config.SaveRadioActiveState;
         TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup;
         EnableEmergencyRadio = config.EnableEmergencyRadio;
@@ -1202,6 +1250,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.AcceptedPolicyVersion = _acceptedPolicyVersion;
 
         _config.AutoConnect = AutoConnect;
+        _config.StartMinimized = StartMinimized;
+        _config.LaunchOnStartup = LaunchOnStartup;
         _config.SaveRadioActiveState = SaveRadioActiveState;
         _config.TurnOnEmergencyOnStartup = TurnOnEmergencyOnStartup;
         _config.EnableEmergencyRadio = EnableEmergencyRadio;

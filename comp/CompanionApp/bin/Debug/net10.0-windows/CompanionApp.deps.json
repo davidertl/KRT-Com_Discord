@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "CompanionApp/1.0.0": {
+      "CompanionApp/0.0.5-alpha": {
         "dependencies": {
           "Concentus": "1.1.7",
           "NAudio": "2.2.1",
@@ -106,7 +106,7 @@
     }
   },
   "libraries": {
-    "CompanionApp/1.0.0": {
+    "CompanionApp/0.0.5-alpha": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

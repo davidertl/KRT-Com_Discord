@@ -17,6 +17,8 @@ namespace CompanionApp.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
+    public const string AppVersion = "Alpha 0.0.5";
+
     private CompanionConfig _config = new();
     private HotkeyHook? _hook;
     private BackendClient? _backend;
@@ -116,8 +118,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string ServerVersion
     {
         get => _serverVersion;
-        set { _serverVersion = value; OnPropertyChanged(); }
+        set { _serverVersion = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsVersionMismatch)); OnPropertyChanged(nameof(VersionMismatchText)); }
     }
+
+    public bool IsVersionMismatch => IsServerVerified
+        && !string.IsNullOrEmpty(ServerVersion)
+        && !string.Equals(ServerVersion, AppVersion, StringComparison.OrdinalIgnoreCase);
+
+    public string VersionMismatchText =>
+        $"Warning: Version mismatch — Server is {ServerVersion}, Companion is {AppVersion}. This may cause compatibility issues.";
 
     private bool _serverDsgvoEnabled;
     public bool ServerDsgvoEnabled
@@ -172,7 +181,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>True when user can click "Login with Discord".</summary>
-    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress;
+    public bool CanLoginWithDiscord => IsServerVerified && PolicyAccepted && OauthEnabled && !_isOAuthInProgress && !IsLoggedIn;
 
     /// <summary>Hint text shown when button is disabled.</summary>
     public string DiscordLoginHint
@@ -183,6 +192,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (!OauthEnabled) return "Server does not have Discord OAuth configured.";
             if (!PolicyAccepted) return "Accept the privacy policy to enable login.";
             if (_isOAuthInProgress) return "Login in progress…";
+            if (IsLoggedIn) return "";
             return "";
         }
     }
@@ -205,7 +215,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string LoggedInDisplayName
     {
         get => _loggedInDisplayName;
-        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); }
+        set { _loggedInDisplayName = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsLoggedIn)); OnPropertyChanged(nameof(CanLoginWithDiscord)); OnPropertyChanged(nameof(DiscordLoginHint)); }
     }
 
     public bool IsLoggedIn => !string.IsNullOrEmpty(LoggedInDisplayName);
@@ -676,8 +686,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             IsServerVerified = true;
+            OnPropertyChanged(nameof(IsVersionMismatch));
+            OnPropertyChanged(nameof(VersionMismatchText));
             VerifyStatusText = $"Server verified: {status.Version}";
             LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode} oauth={status.OauthEnabled}");
+            if (IsVersionMismatch)
+                LogDebug($"[Verify] VERSION MISMATCH: server={status.Version} companion={AppVersion}");
         }
         catch (Exception ex)
         {
@@ -1517,7 +1531,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task ConnectVoiceAsync()
     {
-        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort} userId={DiscordUserId} guildId={GuildId}");
+        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort}");
 
         if (_voice != null)
         {

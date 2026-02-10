@@ -86,6 +86,10 @@ public sealed class VoiceService : IDisposable
     private int _currentFreqId;
     private uint _txSequence;
 
+    // ---- heartbeat / pong tracking ----
+    private long _lastPongTicks = 0;
+    private const int PongTimeoutSeconds = 30;
+
     // ---- connection info ----
     private string _host = "";
     private int _wsPort = 3000;
@@ -136,6 +140,14 @@ public sealed class VoiceService : IDisposable
     /// </summary>
     public async Task ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
     {
+        // Validate host
+        if (string.IsNullOrWhiteSpace(host))
+            throw new ArgumentException("Voice host cannot be empty.", nameof(host));
+
+        // Validate port range (1-65535)
+        if (wsPort < 1 || wsPort > 65535)
+            throw new ArgumentOutOfRangeException(nameof(wsPort), $"Port must be between 1 and 65535, got {wsPort}.");
+
         _host = host;
         _wsPort = wsPort;
         _discordUserId = discordUserId;
@@ -160,7 +172,11 @@ public sealed class VoiceService : IDisposable
             .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
             .TrimEnd('/');
 
-        var wsUri = new Uri($"{scheme}://{cleanHost}:{wsPort}/voice");
+        // Don't append port if it's the default for the scheme (443 for wss, 80 for ws)
+        bool isDefaultPort = (scheme == "wss" && wsPort == 443) || (scheme == "ws" && wsPort == 80);
+        var wsUri = isDefaultPort
+            ? new Uri($"{scheme}://{cleanHost}/voice")
+            : new Uri($"{scheme}://{cleanHost}:{wsPort}/voice");
         Status($"Connecting to {wsUri} ...");
 
         try
@@ -450,6 +466,7 @@ public sealed class VoiceService : IDisposable
             switch (type)
             {
                 case "auth_ok":
+                    _lastPongTicks = DateTime.UtcNow.Ticks;
                     _sessionToken = root.TryGetProperty("sessionToken", out var st) ? st.GetString() ?? "" : "";
 
                     // Set up audio send channel for binary WS frames
@@ -502,6 +519,10 @@ public sealed class VoiceService : IDisposable
                     var muteFreq = root.TryGetProperty("freqId", out var mf) ? mf.GetInt32() : 0;
                     var isMuted = root.TryGetProperty("muted", out var mm) && mm.GetBoolean();
                     MuteConfirmed?.Invoke(muteFreq, isMuted);
+                    break;
+
+                case "pong":
+                    _lastPongTicks = DateTime.UtcNow.Ticks;
                     break;
 
                 case "error":
@@ -728,6 +749,21 @@ public sealed class VoiceService : IDisposable
             while (!ct.IsCancellationRequested && IsConnected)
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), ct);
+
+                // Check if last pong is stale
+                var elapsed = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastPongTicks));
+                if (elapsed.TotalSeconds > PongTimeoutSeconds)
+                {
+                    Status("Heartbeat timeout — no pong received, reconnecting...");
+                    _ = Task.Run(async () =>
+                    {
+                        await DisconnectAsync();
+                        try { await ConnectAsync(_host, _wsPort, _discordUserId, _guildId, _authToken); }
+                        catch { }
+                    });
+                    return;
+                }
+
                 await WsSendAsync(new { type = "ping" }, ct);
             }
         }

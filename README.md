@@ -1,188 +1,221 @@
-# KRT-Com / das-krt – Funkkommunikation für Discord
+# das-krt.com – Funkkommunikation für Discord
 
-**Status:** Alpha 0.0.3  
-**Stand:** Backend + Companion App funktional, Security-Rework aktiv
+KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
----
-
-## Projektziel
-
-KRT-Com (das-krt) ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins.
-
-User sollen **parallel** mit mehreren Gruppen kommunizieren können, ohne den Voice-Channel zu wechseln. Der Fokus liegt auf realistischer Funklogik statt klassischem Voice-Chat.
+**Status:** Alpha 0.0.5  
+**Nächster Fokus:** Rate-Limiting & verbleibende Security-Härtung
 
 ---
 
-## Kernfunktionen (aktuell)
+## Inhaltsverzeichnis
 
-### ✔ Implementiert (Alpha 0.0.3)
-
-**Backend:**
-* Discord Bot (read-only, Discord API, `syncGuildMembers` on startup)
-* Voice-State-Erkennung (`voiceStateUpdate`)
-* Frequenz-Zuordnung via `channels.json` (automatischer Channel-Sync alle 24h)
-* Push-to-Talk Events (`start` / `stop`) mit Opus-Audio-Relay
-* Persistente Speicherung (SQLite WAL)
-* WebSocket-Realtime-Broadcast (Voice + State Hub)
-* Token-basierte Authentifizierung (HMAC-SHA256, 24h Expiry)
-* DSGVO-Compliance-Modul (automatische Datenbereinigung, DiscordUserID-/GuildID-Löschung)
-* Ban-Management (REST + CLI)
-* Privacy Policy Endpoint (versioniert, konfigurierbar)
-* Server-Status Endpoint (öffentlich)
-* Systemd-Service + idempotentes `install.sh`
-* Admin-CLI (`service.sh`) mit 43 Menüpunkten
-
-**Companion App (.NET 10, WPF):**
-* Multi-Radio UI (bis zu 4 Frequenzen + Notfall-Funk)
-* Push-to-Talk mit konfigurierbaren Hotkeys (systemweit)
-* Opus-Audio-Capture & -Playback (NAudio)
-* TX/RX Beep-Sounds mit Volume-Kontrolle
-* Server-Verifizierung (Verify-Button: Status + Privacy Policy abrufen)
-* Datenschutz-Einwilligung (Privacy Policy anzeigen + akzeptieren)
-* Token-basierter Login (POST /auth/login → signierter Token)
-* Auto-Reconnect mit gespeichertem Token
-* Listener-Count pro Frequenz (Live-Updates)
-* Channel-Namen-Anzeige (Discord-Kanal → Frequenz-Mapping)
-* Server-seitiges Mute/Unmute
-* Konfigurationspersistenz (%APPDATA%/das-KRT_com/config.json)
-
-### ⏳ In Arbeit / Nächster Schritt
-
-* TLS-Verschlüsselung via Traefik Reverse Proxy
-* User-ID-Hashing in Datenbank
-* Notfall-Funk Erweiterungen (Caller-Anzeige, signifikante Beep-Sounds)
-* Ingame-Overlay
+- [Features](#features)
+- [Architektur](#architektur)
+- [Voraussetzungen](#voraussetzungen)
+- [Discord OAuth2 Setup](#discord-oauth2-setup)
+- [Installation & Setup](#installation--setup)
+- [Admin-CLI (service.sh)](#admin-cli-servicesh)
+- [Sicherheit](#sicherheit)
+- [Datenbank](#datenbank)
+- [Roadmap](#roadmap)
 
 ---
 
-## Architekturübersicht
+## Features
+
+### Backend (Node.js 24)
+
+| Bereich | Feature |
+|---|---|
+| **Discord-Integration** | Bot (read-only), Voice-State-Erkennung (`voiceStateUpdate`), Guild-Member-Sync, Channel-Sync (24h-Intervall) |
+| **Funk-Logik** | Push-to-Talk Events (start/stop), Opus-Audio-Relay via WebSocket, Half-Duplex, Persistente TX-History |
+| **Authentifizierung** | Discord OAuth2 Login (Authorization Code Flow), HMAC-SHA256 Token-Auth (24h Expiry), Debug-Login gated |
+| **Datenschutz** | DSGVO-Compliance-Modul (Auto-Cleanup 2/7 Tage), User-ID-Hashing (HMAC-SHA256), Privacy Policy Endpoint |
+| **Administration** | Ban-Management (REST + CLI), Admin-CLI mit interaktivem Menü (64+ Funktionen), Server-Status Endpoint |
+| **Infrastruktur** | SQLite WAL, Systemd-Service, idempotentes `install.sh`, Traefik Reverse Proxy (Let's Encrypt) |
+
+### Companion App (.NET 10, WPF)
+
+| Bereich | Feature |
+|---|---|
+| **Funk-UI** | Multi-Radio (bis zu 4 Frequenzen + Notfall-Funk), Listener-Count pro Frequenz, Channel-Namen-Display |
+| **Audio** | Push-to-Talk (systemweite Hotkeys), Opus Capture & Playback (NAudio), TX/RX Beep-Sounds mit Volume-Kontrolle |
+| **Auth & Verbindung** | "Login with Discord" (Browser-Flow), Auto-Reconnect mit gespeichertem Token, Server-Verifizierung (Verify-Button) |
+| **Compliance** | Datenschutz-Einwilligung (Privacy Policy Anzeige + Akzeptanz), Server-seitiges Mute/Unmute |
+| **Konfiguration** | Einstellungen in `%APPDATA%/das-KRT_com/config.json`, Admin-Token nur im Debug-Modus sichtbar |
+
+---
+
+## Architektur
 
 ```
 [Companion App (.NET 10 / WPF)]
-   ├─ Hotkeys (PTT, systemweit)
-   ├─ Audio Capture/Playback (NAudio, Opus)
-   ├─ Server-Verify (GET /server-status, GET /privacy-policy)
-   ├─ Auth (POST /auth/login → HMAC-SHA256 Token)
-   └─ Voice WebSocket (Opus Audio Relay + State)
+   ├─ Hotkeys, Audio (NAudio/Opus), Auth, UI
+   └─ HTTPS / WSS (TLS)
+            │
+            ▼
+[Traefik Reverse Proxy]
+   ├─ TLS Termination (Let's Encrypt / ACME)
+   ├─ HTTP → HTTPS Redirect
+   └─ Proxy → http://127.0.0.1:3000
             │
             ▼
 [das-krt Backend – Node.js 24]
    ├─ REST API (Public + Auth + Admin)
-   ├─ Voice WebSocket (Opus Relay, Token-Auth)
+   ├─ Voice WebSocket (Opus Relay)
    ├─ State WebSocket Hub
-   ├─ SQLite WAL (voice_state, tx_events, voice_sessions,
-   │              freq_listeners, banned_users, auth_tokens,
-   │              policy_acceptance)
-   ├─ DSGVO Module (Auto-Cleanup, Scheduler)
-   ├─ Crypto Module (HMAC-SHA256 Token Sign/Verify)
-   ├─ Channel Sync (Discord → Frequenz-Mapping)
-   └─ Discord Bot (Status, Namen, Guild-Verify)
+   ├─ Discord Bot (read-only)
+   ├─ SQLite WAL (8 Tabellen)
+   ├─ DSGVO Module (Auto-Cleanup)
+   └─ Crypto Module (HMAC-SHA256)
 ```
 
-* **Audio-Transport** über Voice-WebSocket (Opus-Pakete, Server als Relay)
-* Backend ist **State- & Event-Autorität**
-* Authentifizierung über HMAC-signierte Tokens (24h Gültigkeit)
+### Push-to-Talk Ablauf
+
+1. **PTT-Taste** → Companion App erkennt systemweiten Hotkey.
+2. **Audio-Capture** startet, Opus-Pakete werden über Voice-WebSocket gestreamt.
+3. **TX-Event** wird an Backend gemeldet → Realtime-Broadcast an alle Listener auf der Frequenz.
+4. **Half-Duplex** wird clientseitig erzwungen (kein gleichzeitiges Senden und Empfangen).
+
+### Identität & Anzeigenamen
+
+- **Verifizierte Identität**: Über Discord OAuth2 (kein Self-Reporting möglich).
+- **Mitgliedschaft**: Guild-Mitgliedschaft wird serverseitig via Discord Bot geprüft.
+- **Anzeigename**: Verwendet den **Server-Nickname** (nicht global_name).
+- **Synchronisation**: Namensänderungen werden bei Voice-Events oder alle 24h synchronisiert. Es findet keine Historisierung statt; nur der aktuellste Name wird gespeichert.
 
 ---
 
-## Authentifizierung & Login-Flow
+## Voraussetzungen
 
-1. Nutzer gibt Server-Adresse + Port ein
-2. Klick auf **Verify** → `GET /server-status` + `GET /privacy-policy`
-3. Server-Status und Datenschutzerklärung werden angezeigt
-4. Nutzer akzeptiert Privacy Policy → `POST /auth/accept-policy`
-5. Discord User ID + Guild ID eingeben → **Connect**
-6. `POST /auth/login` → Server verifiziert Nutzer via Discord Bot Guild-Member-Lookup
-7. Bei Erfolg: HMAC-SHA256 signierter Token (24h) zurück
-8. Voice-WebSocket-Verbindung mit Token-Auth
-9. Token wird lokal gespeichert für Auto-Reconnect
+### Server
+- **OS**: Debian/Ubuntu (mit Systemd)
+- **Runtime**: Node.js 24
+- **Domain**: Öffentliche Domain mit DNS A-Record auf den Server
+- **Ports**: 80 (Redirect), 443 (HTTPS/WSS)
+- **Infrastruktur**: Traefik v3 (wird automatisch via `install.sh` eingerichtet)
 
----
-
-## Push-to-Talk Logik
-
-* PTT wird **lokal** in der Companion App erkannt (systemweite Hotkeys)
-* Bei Tastendruck: Audio-Capture startet, Opus-Pakete werden über Voice-WS gestreamt
-* TX-Event wird an Backend gemeldet (REST)
-* Backend speichert Event + Realtime-Broadcast an alle Listener
-* Half-Duplex wird **clientseitig** enforced
+### Companion App
+- **OS**: Windows 10/11
+- **Runtime**: .NET 10
+- **Hardware**: WASAPI-kompatible Soundkarte
 
 ---
 
-## Identität & Anzeigenamen
+## Discord OAuth2 Setup
 
-* Companion App sendet Discord User ID + Guild ID
-* Backend verifiziert Mitgliedschaft via Discord Bot
-* Anzeigename wird serverseitig ermittelt:
-  * **Server-Nickname** (nicht global_name)
-* Namensänderungen dürfen historisch durchschlagen
+1. **Application erstellen**: Unter [discord.com/developers/applications](https://discord.com/developers/applications).
+2. **Bot einrichten**: "Guild Members Intent" aktivieren (notwendig für Namens-Sync).
+3. **OAuth2 Konfiguration**:
+   - **Client ID + Client Secret** notieren.
+   - **Redirect URL** hinzufügen: `https://<DOMAIN>/auth/discord/callback`.
+   - **Scopes**: `identify`, `guilds`.
 
-➡️ Keine Historisierung von Namen notwendig
+### OAuth2 Flow
+
+```
+Companion App                    Server                      Discord
+     │                             │                            │
+     ├─ GET /auth/discord/redirect ─►                           │
+     │  (mit state param)          │                            │
+     │                             ├─ 302 Redirect ────────────►│
+     │                             │  (authorize URL)           │
+     │  ◄── Browser öffnet ────────┤                            │
+     │                             │                            │
+     │  User autorisiert ──────────┼───────────────────────────►│
+     │                             │                            │
+     │                             │◄── GET /callback?code= ────┤
+     │                             │                            │
+     │                             ├─ POST /oauth2/token ──────►│
+     │                             │◄── access_token ───────────┤
+     │                             │                            │
+     │                             ├─ GET /users/@me ──────────►│
+     │                             │◄── user identity ──────────┤
+     │                             │                            │
+     │                             ├─ POST /token/revoke ──────►│
+     │                             │  (access token widerrufen) │
+     │                             │                            │
+     │  ◄── GET /auth/discord/poll ┤                            │
+     │  (token + displayName)      │                            │
+     └─────────────────────────────┘                            │
+```
 
 ---
 
-## Datenbank
+## Installation & Setup
 
-### Aktive Tabellen
+### Server-Deployment
 
-* `voice_state` – Aktuelle Voice-States
-* `tx_events` – TX-Event-History
-* `voice_sessions` – Aktive WebSocket-Sessions
-* `freq_listeners` – Frequenz-Subscriber pro Session
-* `banned_users` – Gesperrte Nutzer (Discord User ID)
-* `auth_tokens` – Ausgestellte Auth-Tokens (Token ID, User, Expiry)
-* `policy_acceptance` – Datenschutz-Einwilligungen (User + Version)
+Die Installation erfolgt menügeführt über ein idempotentes (geiles Wort, oder? ;) ) Skript:
 
----
+```bash
+# install.sh herunterladen und ausführen
+bash install.sh
+```
 
-## Anforderungen
+**Was das Skript erledigt:**
+- Node.js Backend unter `/opt/das-krt/backend` einrichten.
+- Traefik Reverse Proxy mit Let's Encrypt (TLS) konfigurieren.
+- Systemd-Service (`das-krt-backend`) erstellen und starten.
+- Interaktive Abfrage von Discord Bot Token, OAuth2 Credentials und Admin-Token.
 
-### Muss
+### Admin-CLI (service.sh)
 
-* ✔ Discord Bot
-* ✔ Push-to-Talk je Frequenz
-* ✔ Mehrere Frequenzen gleichzeitig empfangbar
-* ✔ Half-Duplex
-* ✔ Windows-Client
-* ✔ Discord Server-intern
-* ✔ Externer Debian Server
+Das zentrale Werkzeug zur Verwaltung des Servers:
 
-### Soll
-* ⏳ ACLs für Frequenzen
-? ⏳ Statusabhängige Erreichbarkeit
+```bash
+bash service.sh [start|stop|restart|status|logs|menu]
+```
 
-### Kann
-
-* ⏳ Subgruppen/zusätzliche Verschlüsselung keyphrase hashing
-* ⏳ Externe Statusanzeige (z. B. Mumble)
+| Bereich | Funktionen |
+|---|---|
+| **Service** | Start / Stop / Restart / Status & Healthcheck |
+| **Tools** | `channels.json` bearbeiten, Healthcheck, Testlogs, Live-Logs |
+| **Monitoring** | TX Events simulieren, TX Recent History, User Directory |
+| **DSGVO** | Status, Toggle, Debug-Modus, User/Guild löschen, Manueller Cleanup |
+| **Kanal-Sync** | Bot-Status, Manueller Trigger, Sync-Intervall ändern |
+| **Security** | Ban/Unban (ID-basiert), Debug-Login Toggle, OAuth2 Credentials Update |
+| **Traefik** | Status, Logs, Domain-Wechsel, Zertifikats-Check |
 
 ---
 
 ## Sicherheit
 
-### Implementiert (Alpha 0.0.3)
-
-* Token-basierte Auth (HMAC-SHA256, 24h Expiry)
-* Server-seitige User-Verifizierung via Discord Bot
-* Ban-System (Login + Voice-Auth blockiert)
-* Privacy Policy Consent Flow
-* DSGVO Auto-Cleanup (2 Tage / 7 Tage Debug)
-* Admin-Token für Management-Endpoints
-
-### Ausstehend
-
-* TLS-Verschlüsselung (HTTPS/WSS) via Reverse Proxy
-* User-ID-Hashing in Datenbank
-* Rate-Limiting
-* CORS-Policy
-* Helmet Security Headers
-* DPAPI-Verschlüsselung für lokale Konfiguration
+- **Transport**: TLS (HTTPS/WSS) via Traefik. DSGVO-HTTPS-Enforcement lehnt unverschlüsselten Traffic ab.
+- **Authentifizierung**: Discord OAuth2 (Authorization Code Flow). HMAC-SHA256 signierte Tokens mit 24h Gültigkeit.
+- **Datenschutz**: **User-ID-Hashing** (HMAC-SHA256). In der Datenbank werden keine rohen Discord-IDs gespeichert (außer für Bans im Admin-View). Bei einem Leak sind IDs nicht rekonstruierbar.
+- **Zugriffsschutz**: Ban-System, Admin-Tokens (nicht persistiert in der App), Debug-Endpoints sind standardmäßig deaktiviert.
 
 ---
 
-## Aktueller Stand
+## Datenbank
 
-✔ Backend stabil (Alpha 0.0.3)  
-✔ Companion App funktional (Multi-Radio, PTT, Audio, Auth)  
-✔ Security-Rework Phase 1 abgeschlossen (Token-Auth, Ban, DSGVO, Consent)  
-➡️ Nächster Fokus: **TLS-Verschlüsselung** + verbleibende Security-Härtung
+SQLite (WAL Mode) mit folgendem Schema:
+
+| Tabelle | Beschreibung |
+|---|---|
+| `voice_state` | Aktuelle Voice-Channel Belegung der User |
+| `tx_events` | Historie der Sendevorgänge (PTT) |
+| `voice_sessions` | Aktive WebSocket-Verbindungen |
+| `freq_listeners` | Zuordnung User -> Frequenzen |
+| `banned_users` | Blacklist (gehasht + raw für Admin) |
+| `auth_tokens` | Gültige Sitzungstoken |
+| `policy_acceptance`| Versionierte Bestätigung der Datenschutzregeln |
+| `discord_users` | Cache für Anzeigenamen (gehashte IDs) |
+
+---
+
+## Roadmap
+
+### Zeitnah
+- [ ] **Rate-Limiting** & Security-Härtung (CORS, Helmet)
+- [ ] ACLs für Frequenzen (Berechtigungen)
+- [ ] Statusabhängige Erreichbarkeit
+- [ ] Notfall-Funk Erweiterungen (Caller-Anzeige, Alarm-Beeps)
+- [ ] Ingame-Overlay (Statusanzeige im Spiel)
+
+### Später
+- [ ] Subgruppen / Zusätzliche Verschlüsselung (Keyphrase-Hashing)
+- [ ] Externe Statusanzeige (Web-Interface)
+- [ ] Under-Attack-Mode (Automatisierte Abwehr)
+- [ ] Multi-Guild Support (aktuell auf eine Guild limitiert)

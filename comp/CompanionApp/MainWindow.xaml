@@ -2,9 +2,10 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:util="clr-namespace:CompanionApp.Utilities"
-        Title="das-KRT Companion" Height="750" Width="950"
+        Title="das-KRT Companion | Alpha 0.0.5" Height="750" Width="950"
         MinHeight="650" MinWidth="850"
         WindowStartupLocation="CenterScreen"
+        Icon="app-icon.ico"
         Background="#1E1E2E">
   <Window.Resources>
     <!-- Dark theme colors -->
@@ -151,6 +152,7 @@
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
     <util:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis"/>
     <util:StringToVisibilityConverter x:Key="StringToVis"/>
+    <util:BoolToHiddenVisibilityConverter x:Key="BoolToHidden"/>
   </Window.Resources>
 
   <Grid>
@@ -166,6 +168,8 @@
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
           <TextBlock Text="das-KRT Companion" FontSize="16" FontWeight="Bold" 
                      Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"/>
+          <TextBlock Text="Alpha 0.0.5" FontSize="11" 
+                     Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="10,2,0,0"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <Ellipse Width="10" Height="10" Margin="0,0,6,0" VerticalAlignment="Center">
@@ -232,15 +236,36 @@
                   <StackPanel Grid.Column="2">
                     <TextBlock Text="EMERGENCY" FontWeight="Bold" FontSize="14" 
                                Foreground="{StaticResource EmergencyBorder}" Margin="0,0,0,6"/>
-                    <Border Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
-                      <StackPanel>
-                        <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
-                                   Foreground="{StaticResource FreqDisplayText}"/>
-                        <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
-                                   Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
-                                   Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToVis}}"/>
-                      </StackPanel>
-                    </Border>
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <!-- Frequency Display -->
+                      <Border Grid.Column="0" Background="{StaticResource FreqDisplayBg}" CornerRadius="4" Padding="12,6">
+                        <StackPanel>
+                          <TextBlock Text="{Binding EmergencyRadio.FrequencyDisplay}" FontFamily="Consolas" FontSize="24" 
+                                     Foreground="{StaticResource FreqDisplayText}"/>
+                          <TextBlock Text="{Binding EmergencyRadio.ChannelName}" FontSize="10" FontStyle="Italic"
+                                     Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
+                                     Visibility="{Binding EmergencyRadio.HasChannelName, Converter={StaticResource BoolToHidden}}"/>
+                        </StackPanel>
+                      </Border>
+                      <!-- Recent Callers (black display right of frequency) -->
+                      <Border Grid.Column="1" Background="#111111" CornerRadius="4" Padding="8,6" Margin="8,0,0,0" MinWidth="140">
+                        <StackPanel>
+                          <TextBlock Text="Recent:" Foreground="{StaticResource EmergencyBorder}" FontSize="9" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                          <ItemsControl ItemsSource="{Binding EmergencyRadio.RecentTransmissions}" MaxHeight="50">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate>
+                                <TextBlock Text="{Binding}" Foreground="#FF6644" FontSize="10" FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis"/>
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                        </StackPanel>
+                      </Border>
+                    </Grid>
                   </StackPanel>
 
                   <!-- Listener Count -->
@@ -350,10 +375,10 @@
                               <TextBox Grid.Column="1" Text="{Binding FreqInput, UpdateSourceTrigger=PropertyChanged}" 
                                        Style="{StaticResource FreqInputBox}" VerticalAlignment="Center"/>
                             </Grid>
-                            <!-- Channel name from Discord (shown when available) -->
+                            <!-- Channel name from Discord (shown when available, Hidden to preserve layout) -->
                             <TextBlock Text="{Binding ChannelName}" FontSize="11" FontStyle="Italic"
                                        Foreground="{StaticResource FreqDisplayText}" Opacity="0.7" Margin="0,2,0,0"
-                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToVis}}"/>
+                                       Visibility="{Binding HasChannelName, Converter={StaticResource BoolToHidden}}"/>
                           </StackPanel>
                         </Border>
 
@@ -739,6 +764,22 @@
                       <TextBlock Grid.Column="1" Text="{Binding ServerVersion}" Foreground="{StaticResource TextPrimary}" FontSize="11"/>
                     </Grid>
 
+                    <!-- Version mismatch warning -->
+                    <Border Background="#3A3020" CornerRadius="4" Padding="8" Margin="0,4,0,6">
+                      <Border.Style>
+                        <Style TargetType="Border">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsVersionMismatch}" Value="True">
+                              <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Border.Style>
+                      <TextBlock Text="{Binding VersionMismatchText}"
+                                 Foreground="{StaticResource AccentYellow}" FontSize="11" TextWrapping="Wrap"/>
+                    </Border>
+
                     <Grid Margin="0,0,0,6">
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="120"/>
@@ -829,20 +870,21 @@
                       <TextBlock Text="{Binding LoggedInDisplayName}" Foreground="{StaticResource AccentGreen}" FontSize="12" FontWeight="SemiBold"/>
                     </StackPanel>
 
-                    <!-- Hint when button is disabled -->
+                    <!-- Hint when button is disabled (hidden when logged in) -->
                     <TextBlock Text="{Binding DiscordLoginHint}" Foreground="#FF8866" FontSize="11" Margin="0,0,0,8"
                                TextWrapping="Wrap"
-                               Visibility="{Binding CanLoginWithDiscord, Converter={StaticResource InverseBoolToVis}}"/>
+                               Visibility="{Binding DiscordLoginHint, Converter={StaticResource StringToVis}}"/>
 
                     <!-- OAuth login status -->
                     <TextBlock Text="{Binding OAuthLoginStatus}" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,8"
                                TextWrapping="Wrap"
                                Visibility="{Binding OAuthLoginStatus, Converter={StaticResource StringToVis}}"/>
 
-                    <!-- Login with Discord button -->
+                    <!-- Login with Discord button (hidden when already logged in) -->
                     <Button Content="Login with Discord" Style="{StaticResource ModernButton}"
                             Click="LoginWithDiscord_Click"
                             IsEnabled="{Binding CanLoginWithDiscord}"
+                            Visibility="{Binding IsLoggedIn, Converter={StaticResource InverseBoolToVis}}"
                             HorizontalAlignment="Left" Margin="0,0,0,8"/>
 
                     <!-- Voice connect/disconnect -->

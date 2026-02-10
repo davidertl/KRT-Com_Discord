@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.3
+##version alpha-0.0.5
 ## Service management & tools for das-krt Backend
 ## Usage: bash service.sh [start|stop|restart|status|logs|menu]
 
@@ -22,8 +22,22 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.3"
+VERSION="Alpha 0.0.5"
 SERVICE_NAME="das-krt-backend"
+
+# --------------------------------------------------
+# JSON Escape Helper (prevents injection via user input)
+# --------------------------------------------------
+json_escape() {
+  local str="$1"
+  # Escape backslashes, double quotes, and control characters
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  printf '%s' "$str"
+}
 
 # --------------------------------------------------
 # Variablen
@@ -33,6 +47,8 @@ BACKEND_DIR="$APP_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
 CHANNEL_MAP="$APP_ROOT/config/channels.json"
 TEST_LOG="$APP_ROOT/logs/backend-test.log"
+TRAEFIK_SERVICE="traefik"
+TRAEFIK_DIR="$APP_ROOT/traefik"
 
 # --------------------------------------------------
 # Service Commands
@@ -119,12 +135,7 @@ show_dsgvo_warnings() {
   DEBUG_TOOL="$(echo "$RESPONSE" | grep -o '"debugToolActive":[a-z]*' | cut -d: -f2 || true)"
 
   if [ "$ENABLED" = "false" ]; then
-    echo ""
-    if [ "$DEBUG_ON" = "true" ]; then
-      log_warn "DSGVO Compliance Modus ist DEAKTIVIERT (Debug-Modus aktiv)"
-    else
-      log_warn "DSGVO Compliance Modus ist DEAKTIVIERT — Userdaten werden NICHT automatisch gelöscht"
-    fi
+    log_warn "DSGVO Compliance Mode ist DEAKTIVIERT — Daten werden NICHT automatisch gelöscht"
   fi
   if [ "$DEBUG_TOOL" = "true" ]; then
     log_warn "Ein Debug-Tool ist aktiv — automatisches Cleanup ist pausiert"
@@ -242,7 +253,7 @@ do_dsgvo_delete_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-user" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -277,7 +288,7 @@ do_dsgvo_delete_guild() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-guild" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"guildId\":\"${GUILD_ID}\"}" 2>/dev/null || true)"
+    -d "{\"guildId\":\"$(json_escape "$GUILD_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -391,6 +402,12 @@ do_channel_sync_interval() {
   read -r -p "$(echo -e "${CYAN}Neues Sync-Intervall in Stunden (min 1) [24]: ${NC}")" HOURS
   HOURS="${HOURS:-24}"
 
+  # Validate numeric input
+  if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -lt 1 ]; then
+    log_error "Ungültige Eingabe: '$HOURS' (muss eine Zahl >= 1 sein)"
+    return
+  fi
+
   local RESPONSE
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/interval" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
@@ -427,7 +444,7 @@ do_ban_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/ban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\",\"reason\":\"${BAN_REASON}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\",\"reason\":\"$(json_escape "$BAN_REASON")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     log_ok "User $USER_ID gebannt"
@@ -454,7 +471,7 @@ do_unban_user() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/unban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     log_ok "User $USER_ID entbannt"
@@ -507,7 +524,7 @@ do_delete_and_ban() {
   RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-and-ban" \
     -H "x-admin-token: $ADMIN_TOKEN_VAL" \
     -H "content-type: application/json" \
-    -d "{\"discordUserId\":\"${USER_ID}\"}" 2>/dev/null || true)"
+    -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     local TOTAL
@@ -515,6 +532,298 @@ do_delete_and_ban() {
     log_ok "Alle Daten für User $USER_ID gelöscht ($TOTAL Einträge) und User gebannt"
   else
     log_error "Fehler: $RESPONSE"
+  fi
+}
+
+# --------------------------------------------------
+# Traefik Reverse Proxy Management
+# --------------------------------------------------
+do_traefik_status() {
+  echo ""
+  if ! systemctl list-unit-files "$TRAEFIK_SERVICE.service" &>/dev/null 2>&1; then
+    log_warn "Traefik ist nicht installiert"
+    return
+  fi
+
+  systemctl status "$TRAEFIK_SERVICE" --no-pager || true
+  echo ""
+
+  # Check if TLS cert exists in acme.json
+  if [ -f "$TRAEFIK_DIR/acme.json" ]; then
+    local ACME_SIZE
+    ACME_SIZE="$(stat -c%s "$TRAEFIK_DIR/acme.json" 2>/dev/null || echo 0)"
+    if [ "$ACME_SIZE" -gt 10 ]; then
+      # Check if Certificates array actually has entries (not null)
+      if python3 -c "
+import json,sys
+with open('$TRAEFIK_DIR/acme.json') as f:
+  d=json.load(f)
+for r in d.values():
+  certs=r.get('Certificates') if isinstance(r,dict) else None
+  if certs: sys.exit(0)
+sys.exit(1)" 2>/dev/null; then
+        log_ok "TLS Zertifikat: vorhanden in acme.json (${ACME_SIZE} Bytes)"
+      else
+        log_warn "TLS Zertifikat: acme.json vorhanden aber kein Zertifikat bezogen"
+        log_info "Tipp: Nutze Menüpunkt 64 für eine detaillierte Zertifikatsprüfung"
+      fi
+    else
+      log_warn "TLS Zertifikat: noch nicht bezogen (acme.json leer)"
+    fi
+  else
+    log_warn "TLS Zertifikat: acme.json nicht gefunden"
+  fi
+
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -n "$CUR_DOMAIN" ]; then
+    log_info "Domain: $CUR_DOMAIN"
+    log_info "URL:    https://$CUR_DOMAIN"
+  else
+    log_warn "Keine Domain in .env konfiguriert"
+  fi
+  echo ""
+}
+
+do_traefik_restart() {
+  if ! systemctl list-unit-files "$TRAEFIK_SERVICE.service" &>/dev/null 2>&1; then
+    log_warn "Traefik ist nicht installiert"
+    return
+  fi
+
+  log_info "Restarte Traefik ..."
+  systemctl restart "$TRAEFIK_SERVICE"
+  sleep 1
+  if systemctl is-active --quiet "$TRAEFIK_SERVICE"; then
+    log_ok "Traefik neu gestartet"
+  else
+    log_error "Traefik konnte nicht gestartet werden"
+    systemctl status "$TRAEFIK_SERVICE" --no-pager || true
+  fi
+}
+
+do_traefik_logs() {
+  log_info "Traefik Live Logs:"
+  journalctl -u "$TRAEFIK_SERVICE" -f
+}
+
+do_traefik_cert_check() {
+  echo ""
+  log_info "=== Let's Encrypt Zertifikatsprüfung ==="
+  echo ""
+
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -z "$CUR_DOMAIN" ]; then
+    log_error "Keine Domain in .env konfiguriert — kann Zertifikat nicht prüfen"
+    return
+  fi
+  log_info "Domain: $CUR_DOMAIN"
+  echo ""
+
+  # --- 1. Check acme.json ---
+  log_info "--- acme.json Status ---"
+  if [ ! -f "$TRAEFIK_DIR/acme.json" ]; then
+    log_error "acme.json nicht gefunden unter $TRAEFIK_DIR/acme.json"
+  else
+    local ACME_PERMS
+    ACME_PERMS="$(stat -c%a "$TRAEFIK_DIR/acme.json" 2>/dev/null || echo '?')"
+    if [ "$ACME_PERMS" != "600" ]; then
+      log_warn "acme.json Berechtigungen: $ACME_PERMS (sollte 600 sein)"
+    else
+      log_ok "acme.json Berechtigungen: 600"
+    fi
+
+    # Parse acme.json for certificate info
+    python3 -c "
+import json, sys, base64, subprocess, tempfile, os
+try:
+    with open('$TRAEFIK_DIR/acme.json') as f:
+        data = json.load(f)
+except Exception as e:
+    print(f'  FEHLER: acme.json kann nicht gelesen werden: {e}')
+    sys.exit(1)
+
+found = False
+for resolver_name, resolver in data.items():
+    if not isinstance(resolver, dict):
+        continue
+    account = resolver.get('Account')
+    if account and account.get('Registration'):
+        reg = account['Registration']
+        print(f'  ACME Account: registriert (URI: {reg.get("uri", "?")}'[:80] + ')')
+    certs = resolver.get('Certificates')
+    if not certs:
+        print(f'  Zertifikate: KEINE (Certificates ist null oder leer)')
+        continue
+    for cert_entry in certs:
+        domain = cert_entry.get('domain', {}).get('main', '?')
+        sans = cert_entry.get('domain', {}).get('SANs', [])
+        print(f'  Zertifikat für: {domain}')
+        if sans:
+            print(f'  SANs: {", ".join(sans)}')
+        # Decode and inspect certificate
+        cert_pem = cert_entry.get('certificate', '')
+        if cert_pem:
+            try:
+                cert_bytes = base64.b64decode(cert_pem)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pem') as tf:
+                    tf.write(cert_bytes)
+                    tf_name = tf.name
+                result = subprocess.run(
+                    ['openssl', 'x509', '-in', tf_name, '-noout',
+                     '-issuer', '-subject', '-dates', '-fingerprint'],
+                    capture_output=True, text=True, timeout=5
+                )
+                os.unlink(tf_name)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        print(f'  {line}')
+                found = True
+            except Exception as e:
+                print(f'  Zertifikat-Dekodierung fehlgeschlagen: {e}')
+if not found:
+    print('  WARNUNG: Kein gültiges Zertifikat in acme.json gefunden')
+" 2>/dev/null || log_warn "python3/openssl für acme.json-Analyse nicht verfügbar"
+  fi
+  echo ""
+
+  # --- 2. Live TLS check via openssl s_client ---
+  log_info "--- Live TLS-Verbindungstest (openssl) ---"
+  if ! command -v openssl &>/dev/null; then
+    log_warn "openssl ist nicht installiert — Live-Check übersprungen"
+    return
+  fi
+
+  local CERT_OUTPUT
+  CERT_OUTPUT="$(echo | openssl s_client -servername "$CUR_DOMAIN" -connect "$CUR_DOMAIN:443" 2>/dev/null)"
+  if [ -z "$CERT_OUTPUT" ]; then
+    log_error "Keine TLS-Verbindung zu $CUR_DOMAIN:443 möglich"
+    log_info "Ist Traefik gestartet? Läuft Port 443?"
+    return
+  fi
+
+  # Extract certificate details
+  local ISSUER SUBJECT NOT_BEFORE NOT_AFTER SERIAL
+  ISSUER="$(echo "$CERT_OUTPUT" | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer= *//' || echo '?')"
+  SUBJECT="$(echo "$CERT_OUTPUT" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject= *//' || echo '?')"
+  NOT_BEFORE="$(echo "$CERT_OUTPUT" | openssl x509 -noout -startdate 2>/dev/null | cut -d= -f2 || echo '?')"
+  NOT_AFTER="$(echo "$CERT_OUTPUT" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || echo '?')"
+
+  echo "  Subject:    $SUBJECT"
+  echo "  Issuer:     $ISSUER"
+  echo "  Gültig ab:  $NOT_BEFORE"
+  echo "  Gültig bis: $NOT_AFTER"
+
+  # Check if self-signed (Traefik default cert)
+  if echo "$ISSUER" | grep -qi 'TRAEFIK DEFAULT CERT'; then
+    echo ""
+    log_error "SELBST-SIGNIERTES ZERTIFIKAT (Traefik Default Cert)!"
+    log_warn "Let's Encrypt Zertifikat wurde NICHT bezogen."
+    echo ""
+    log_info "Mögliche Ursachen:"
+    log_info "  1. DNS für $CUR_DOMAIN zeigt nicht auf diesen Server"
+    log_info "  2. Port 443 ist durch Firewall blockiert"
+    log_info "  3. ACME Challenge schlägt fehl (prüfe Traefik Logs: Menüpunkt 62)"
+    log_info "  4. acme.json Berechtigungen falsch (muss 600 sein)"
+    echo ""
+    log_info "Sofortmaßnahme: acme.json zurücksetzen und Traefik neustarten:"
+    log_info "  echo '{}' > $TRAEFIK_DIR/acme.json"
+    log_info "  chmod 600 $TRAEFIK_DIR/acme.json"
+    log_info "  systemctl restart traefik"
+  elif echo "$ISSUER" | grep -qi "Let's Encrypt\|R[0-9]\|E[0-9]\|ISRG"; then
+    log_ok "Zertifikat: Let's Encrypt"
+
+    # Calculate days remaining
+    local EXPIRY_EPOCH NOW_EPOCH DAYS_LEFT
+    EXPIRY_EPOCH="$(echo "$CERT_OUTPUT" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 | xargs -I{} date -d '{}' +%s 2>/dev/null || echo 0)"
+    NOW_EPOCH="$(date +%s)"
+    if [ "$EXPIRY_EPOCH" -gt 0 ] 2>/dev/null; then
+      DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+      if [ "$DAYS_LEFT" -lt 0 ]; then
+        log_error "Zertifikat ist ABGELAUFEN seit $(( -DAYS_LEFT )) Tagen!"
+      elif [ "$DAYS_LEFT" -lt 7 ]; then
+        log_warn "Zertifikat läuft in $DAYS_LEFT Tagen ab! (Erneuerung prüfen)"
+      elif [ "$DAYS_LEFT" -lt 30 ]; then
+        log_warn "Zertifikat läuft in $DAYS_LEFT Tagen ab (Erneuerung sollte automatisch erfolgen)"
+      else
+        log_ok "Zertifikat gültig für $DAYS_LEFT Tage"
+      fi
+    fi
+  else
+    log_info "Zertifikats-Aussteller: $ISSUER"
+    log_warn "Kein Let's Encrypt Zertifikat — prüfe ob das gewollt ist"
+  fi
+
+  # --- 3. Verify chain ---
+  local VERIFY_RESULT
+  VERIFY_RESULT="$(echo | openssl s_client -servername "$CUR_DOMAIN" -connect "$CUR_DOMAIN:443" 2>&1 | grep -i 'verify return code' || true)"
+  if echo "$VERIFY_RESULT" | grep -q 'verify return code: 0'; then
+    log_ok "Zertifikatskette: gültig (verify return code: 0)"
+  elif [ -n "$VERIFY_RESULT" ]; then
+    log_warn "Zertifikatskette: $VERIFY_RESULT"
+  fi
+
+  echo ""
+}
+
+do_traefik_update_domain() {
+  echo ""
+  local CUR_DOMAIN
+  CUR_DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  log_info "Aktuelle Domain: ${CUR_DOMAIN:-(nicht gesetzt)}"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Neue Domain (z.B. das-krt.com):${NC} ")" NEW_DOMAIN
+  if [ -z "$NEW_DOMAIN" ]; then
+    log_warn "Keine Domain eingegeben"
+    return
+  fi
+
+  read -r -p "$(echo -e "${CYAN}E-Mail für Let's Encrypt [admin@${NEW_DOMAIN}]:${NC} ")" NEW_EMAIL
+  NEW_EMAIL="${NEW_EMAIL:-admin@${NEW_DOMAIN}}"
+
+  # Update .env
+  sed -i '/^#\?\s*DOMAIN=/d' "$ENV_FILE"
+  echo "DOMAIN=$NEW_DOMAIN" >> "$ENV_FILE"
+
+  # Update Traefik routes
+  if [ -f "$TRAEFIK_DIR/routes.yml" ]; then
+    sed -i "s/Host(\`[^)]*\`)/Host(\`${NEW_DOMAIN}\`)/" "$TRAEFIK_DIR/routes.yml"
+    log_ok "Traefik routes.yml aktualisiert"
+  fi
+
+  # Update Traefik static config (email)
+  if [ -f "$TRAEFIK_DIR/traefik.yml" ]; then
+    sed -i "s/email: .*/email: ${NEW_EMAIL}/" "$TRAEFIK_DIR/traefik.yml"
+    log_ok "Traefik traefik.yml aktualisiert (E-Mail: ${NEW_EMAIL})"
+  fi
+
+  # Update redirect URI if it uses old domain
+  local CUR_REDIRECT
+  CUR_REDIRECT="$(grep -E '^DISCORD_REDIRECT_URI=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  if [ -n "$CUR_REDIRECT" ] && [ -n "$CUR_DOMAIN" ]; then
+    local NEW_REDIRECT="${CUR_REDIRECT//$CUR_DOMAIN/$NEW_DOMAIN}"
+    sed -i "s|^DISCORD_REDIRECT_URI=.*|DISCORD_REDIRECT_URI=$NEW_REDIRECT|" "$ENV_FILE"
+    log_ok "OAuth2 Redirect URI aktualisiert: $NEW_REDIRECT"
+    log_warn "Vergiss nicht, die Redirect URI auch im Discord Developer Portal zu ändern!"
+  fi
+
+  log_ok "Domain auf $NEW_DOMAIN geändert"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Traefik und Backend jetzt neustarten? (j/n): ${NC}")" DO_RESTART
+  if [[ "$DO_RESTART" =~ ^[jJ]$ ]]; then
+    # Reset acme.json for new domain cert
+    if [ -f "$TRAEFIK_DIR/acme.json" ]; then
+      echo "{}" > "$TRAEFIK_DIR/acme.json"
+      chmod 600 "$TRAEFIK_DIR/acme.json"
+      log_info "acme.json zurückgesetzt für neues Zertifikat"
+    fi
+    do_traefik_restart
+    do_restart
+  else
+    log_warn "Änderungen werden erst nach einem Neustart wirksam"
   fi
 }
 
@@ -637,6 +946,144 @@ do_toggle_debug_login() {
 }
 
 # --------------------------------------------------
+# Logging Management
+# --------------------------------------------------
+do_logging_status() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  log_info "Log-Level Status:"
+  local HTTP_CODE BODY FULL_RESP
+  FULL_RESP="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  HTTP_CODE="$(echo "$FULL_RESP" | tail -1)"
+  BODY="$(echo "$FULL_RESP" | head -n -1)"
+  if [ -z "$BODY" ]; then
+    log_error "Backend nicht erreichbar"
+    return
+  fi
+
+  if [ "$HTTP_CODE" != "200" ]; then
+    log_error "Backend hat HTTP $HTTP_CODE zurückgegeben — Logging-Endpunkt nicht verfügbar"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  # Verify it's actually JSON
+  if ! echo "$BODY" | grep -q '"global"'; then
+    log_error "Ungültige Antwort vom Backend (kein JSON)"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  echo ""
+  # Pretty-print each service level
+  local GLOBAL_LVL
+  GLOBAL_LVL="$(echo "$BODY" | grep -o '"global":"[^"]*"' | cut -d'"' -f4)"
+  log_info "Globales Level: ${GLOBAL_LVL:-?}"
+  echo ""
+
+  for SVC in voice http discord dsgvo ws oauth; do
+    local LVL
+    LVL="$(echo "$BODY" | grep -o "\"${SVC}\":\"[^\"]*\"" | cut -d'"' -f4)"
+    if echo "$LVL" | grep -q '(override)'; then
+      log_warn "  $SVC: $LVL"
+    else
+      log_ok "  $SVC: ${LVL:-$GLOBAL_LVL}"
+    fi
+  done
+  echo ""
+  log_info "Verfügbare Levels: minimalLOG | debugLOG | attackLOG"
+  echo ""
+}
+
+do_logging_set() {
+  local ADMIN_TOKEN_VAL
+  ADMIN_TOKEN_VAL="$(get_admin_token)"
+  if [ -z "${ADMIN_TOKEN_VAL:-}" ]; then
+    log_error "ADMIN_TOKEN nicht gesetzt"
+    return
+  fi
+
+  # Pre-check if endpoint exists
+  local CHECK_CODE
+  CHECK_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || echo 0)"
+  if [ "$CHECK_CODE" != "200" ]; then
+    log_error "Logging-Endpunkt nicht verfügbar (HTTP $CHECK_CODE)"
+    log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
+    return
+  fi
+
+  echo ""
+  log_info "Verfügbare Services:"
+  echo -e "  ${CYAN}all${NC}      — Alle Services (globales Level)"
+  echo -e "  ${CYAN}voice${NC}    — Voice Relay"
+  echo -e "  ${CYAN}http${NC}     — HTTP Server & OAuth"
+  echo -e "  ${CYAN}discord${NC}  — Discord Bot"
+  echo -e "  ${CYAN}dsgvo${NC}    — DSGVO Compliance"
+  echo -e "  ${CYAN}ws${NC}       — WebSocket Hub"
+  echo -e "  ${CYAN}oauth${NC}    — OAuth2 Login"
+  echo ""
+  echo -e "  Verfügbare Levels: ${GREEN}minimalLOG${NC} | ${GREEN}debugLOG${NC} | ${GREEN}attackLOG${NC}"
+  echo -e "    minimalLOG = nur kritische Meldungen (Workflow-relevant)"
+  echo -e "    debugLOG   = erweiterte Logs (Debug + Error + Critical)"
+  echo -e "    attackLOG  = wie debugLOG (Platzhalter für zukünftige Angriffsanalyse)"
+  echo ""
+
+  read -r -p "$(echo -e "${CYAN}Service (all/voice/http/discord/dsgvo/ws/oauth): ${NC}")" SERVICE
+  if [ -z "$SERVICE" ]; then
+    log_warn "Kein Service eingegeben"
+    return
+  fi
+
+  # Validate service name
+  case "$SERVICE" in
+    all|voice|http|discord|dsgvo|ws|oauth) ;;
+    *)
+      log_error "Unbekannter Service: $SERVICE (erlaubt: all, voice, http, discord, dsgvo, ws, oauth)"
+      return
+      ;;
+  esac
+
+  read -r -p "$(echo -e "${CYAN}Log-Level (minimalLOG/debugLOG/attackLOG): ${NC}")" LEVEL
+  if [ -z "$LEVEL" ]; then
+    log_warn "Kein Level eingegeben"
+    return
+  fi
+
+  # Validate log level
+  case "$LEVEL" in
+    minimalLOG|debugLOG|attackLOG) ;;
+    *)
+      log_error "Unbekanntes Log-Level: $LEVEL (erlaubt: minimalLOG, debugLOG, attackLOG)"
+      return
+      ;;
+  esac
+
+  local JSON_BODY
+  if [ "$SERVICE" = "all" ]; then
+    JSON_BODY="{\"level\":\"$LEVEL\"}"
+  else
+    JSON_BODY="{\"service\":\"$SERVICE\",\"level\":\"$LEVEL\"}"
+  fi
+
+  local RESPONSE
+  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/log-level" \
+    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+    -H "content-type: application/json" \
+    -d "$JSON_BODY" 2>/dev/null || true)"
+
+  if echo "$RESPONSE" | grep -q '"ok":true'; then
+    log_ok "Log-Level für ${SERVICE} auf ${LEVEL} gesetzt"
+  else
+    log_error "Fehler: $RESPONSE"
+  fi
+}
+
+# --------------------------------------------------
 # Interaktives Menü (Tools)
 # --------------------------------------------------
 do_menu() {
@@ -652,7 +1099,6 @@ do_menu() {
     echo -e "${CYAN} 2) Service stoppen${NC}"
     echo -e "${CYAN} 3) Service neustarten${NC}"
     echo -e "${CYAN} 4) Service Status & Healthcheck${NC}"
-    echo -e "${CYAN} 5) channels.json bearbeiten${NC}"
     echo -e "${CYAN} 6) Backend Healthcheck testen${NC}"
     echo -e "${CYAN} 7) Backend Testlog anzeigen (tail)${NC}"
     echo -e "${CYAN} 8) Backend Live-Logs verfolgen (journalctl -f)${NC}"
@@ -662,7 +1108,6 @@ do_menu() {
     echo -e "${CYAN}--- DSGVO Compliance ---${NC}"
     echo -e "${CYAN}20) DSGVO Status anzeigen${NC}"
     echo -e "${CYAN}21) DSGVO Compliance Modus an/aus${NC}"
-    echo -e "${CYAN}22) Debug Modus an/aus${NC}"
     echo -e "${CYAN}23) Userdaten löschen (Discord ID)${NC}"
     echo -e "${CYAN}24) Guilddaten löschen (Guild ID)${NC}"
     echo -e "${CYAN}25) DSGVO Cleanup manuell ausführen${NC}"
@@ -670,6 +1115,7 @@ do_menu() {
     echo -e "${CYAN}30) Kanal-Sync Status anzeigen${NC}"
     echo -e "${CYAN}31) Kanal-Sync jetzt auslösen${NC}"
     echo -e "${CYAN}32) Kanal-Sync Intervall ändern${NC}"
+    echo -e "${CYAN}33) channels.json bearbeiten${NC}"
     echo -e "${CYAN}--- Ban Management ---${NC}"
     echo -e "${CYAN}40) Benutzer bannen${NC}"
     echo -e "${CYAN}41) Benutzer entbannen${NC}"
@@ -678,6 +1124,15 @@ do_menu() {
     echo -e "${CYAN}--- Security ---${NC}"
     echo -e "${CYAN}50) Debug-Login an/aus (POST /auth/login)${NC}"
     echo -e "${CYAN}51) Discord OAuth2 Zugangsdaten ändern${NC}"
+    echo -e "${CYAN}--- Traefik (Reverse Proxy / TLS) ---${NC}"
+    echo -e "${CYAN}60) Traefik Status & TLS Zertifikat${NC}"
+    echo -e "${CYAN}61) Traefik neustarten${NC}"
+    echo -e "${CYAN}62) Traefik Live-Logs${NC}"
+    echo -e "${CYAN}63) Domain ändern${NC}"
+    echo -e "${CYAN}64) Let's Encrypt Zertifikat prüfen${NC}"
+    echo -e "${CYAN}--- Logging ---${NC}"
+    echo -e "${CYAN}70) Log-Level Status anzeigen${NC}"
+    echo -e "${CYAN}71) Log-Level setzen${NC}"
     echo -e "${CYAN} 0) Beenden${NC}"
     echo ""
 
@@ -697,21 +1152,7 @@ do_menu() {
         do_status
         ;;
       5)
-        log_input "Öffne: $CHANNEL_MAP"
-        nano "$CHANNEL_MAP"
-
-        ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
-        if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
-          if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
-            log_ok "channels.json neu geladen (/admin/reload)"
-          else
-            log_warn "Reload fehlgeschlagen – starte Backend neu"
-            do_restart
-          fi
-        else
-          log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
-          do_restart
-        fi
+        log_warn "Menüpunkt 5 wurde nach 33 verschoben (Kanal-Sync Bereich)."
         ;;
       6)
         log_info "Healthcheck: http://127.0.0.1:3000/health"
@@ -735,9 +1176,12 @@ do_menu() {
         read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" ACTION_IN
         ACTION_IN="${ACTION_IN:-start}"
 
-        if curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
+        # Validate numeric freqId
+        if ! [[ "$FREQ_ID_IN" =~ ^[0-9]+$ ]]; then
+          log_error "Ungültige freqId: '$FREQ_ID_IN' (muss eine Zahl sein)"
+        elif curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
           -H "content-type: application/json" \
-          -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"${ACTION_IN}\"}" >/dev/null; then
+          -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"$(json_escape "$ACTION_IN")\"}" >/dev/null; then
           log_ok "TX Event gesendet"
         else
           log_error "TX Event fehlgeschlagen"
@@ -762,7 +1206,7 @@ do_menu() {
         do_dsgvo_toggle
         ;;
       22)
-        do_dsgvo_debug_toggle
+        log_warn "Menüpunkt 22 wurde entfernt. Debug-Modus kann über Menüpunkt 50 gesteuert werden."
         ;;
       23)
         do_dsgvo_delete_user
@@ -783,6 +1227,23 @@ do_menu() {
         ;;
       32)
         do_channel_sync_interval
+        ;;
+      33)
+        log_input "Öffne: $CHANNEL_MAP"
+        nano "$CHANNEL_MAP"
+
+        ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
+        if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
+          if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
+            log_ok "channels.json neu geladen (/admin/reload)"
+          else
+            log_warn "Reload fehlgeschlagen – starte Backend neu"
+            do_restart
+          fi
+        else
+          log_warn "ADMIN_TOKEN nicht gesetzt – starte Backend neu"
+          do_restart
+        fi
         ;;
 
       # --- Ban Management ---
@@ -805,6 +1266,31 @@ do_menu() {
         ;;
       51)
         do_update_oauth
+        ;;
+
+      # --- Traefik ---
+      60)
+        do_traefik_status
+        ;;
+      61)
+        do_traefik_restart
+        ;;
+      62)
+        do_traefik_logs
+        ;;
+      63)
+        do_traefik_update_domain
+        ;;
+      64)
+        do_traefik_cert_check
+        ;;
+
+      # --- Logging ---
+      70)
+        do_logging_status
+        ;;
+      71)
+        do_logging_set
         ;;
 
       0)

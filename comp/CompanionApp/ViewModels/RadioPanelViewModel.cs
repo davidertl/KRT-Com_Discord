@@ -1,12 +1,39 @@
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 
 namespace CompanionApp.ViewModels;
+
+/// <summary>
+/// A single entry in the Recent Transmissions log.
+/// IsActive is true while the transmission is ongoing (highlighted in UI).
+/// </summary>
+public class RecentTransmissionEntry : INotifyPropertyChanged
+{
+    private string _text = "";
+    private bool _isActive;
+
+    public string Text
+    {
+        get => _text;
+        set { _text = value; OnPropertyChanged(); }
+    }
+
+    public bool IsActive
+    {
+        get => _isActive;
+        set { _isActive = value; OnPropertyChanged(); }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    protected void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}
 
 /// <summary>
 /// Radio transmission status
@@ -42,9 +69,10 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     private int _listenerCount;
     private bool _hasUnsavedChanges;
 
-    // Last 3 transmissions
-    public ObservableCollection<string> RecentTransmissions { get; } = new();
+    // Last transmissions (3 for normal radios, 5 for emergency)
+    public ObservableCollection<RecentTransmissionEntry> RecentTransmissions { get; } = new();
 
+    // ...existing code...
     public int Index
     {
         get => _index;
@@ -244,15 +272,34 @@ public class RadioPanelViewModel : INotifyPropertyChanged
         _freqInput = _freqId.ToString();
     }
 
-    public void AddTransmission(string userName)
+    /// <summary>
+    /// Add a new transmission entry to the Recent log (highlighted as active).
+    /// Emergency radios keep 5 entries, normal radios keep 3.
+    /// </summary>
+    public RecentTransmissionEntry AddTransmission(string displayText)
+    {
+        var entry = new RecentTransmissionEntry { Text = displayText, IsActive = true };
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            RecentTransmissions.Insert(0, entry);
+            var maxEntries = IsEmergencyRadio ? 5 : 3;
+            while (RecentTransmissions.Count > maxEntries)
+            {
+                RecentTransmissions.RemoveAt(RecentTransmissions.Count - 1);
+            }
+        });
+        return entry;
+    }
+
+    /// <summary>
+    /// Deactivate (un-highlight) the most recent active transmission entry matching a key.
+    /// </summary>
+    public void DeactivateLatestTransmission()
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
-            RecentTransmissions.Insert(0, userName);
-            while (RecentTransmissions.Count > 3)
-            {
-                RecentTransmissions.RemoveAt(3);
-            }
+            var active = RecentTransmissions.FirstOrDefault(e => e.IsActive);
+            if (active != null) active.IsActive = false;
         });
     }
 

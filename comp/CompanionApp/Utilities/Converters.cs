@@ -40,3 +40,22 @@ public sealed class StringToVisibilityConverter : IValueConverter
         throw new NotSupportedException();
     }
 }
+
+/// <summary>
+/// Converts a boolean to Visibility: true → Visible, false → Hidden.
+/// Unlike BooleanToVisibilityConverter, Hidden preserves layout space.
+/// </summary>
+public sealed class BoolToHiddenVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is bool b && b)
+            return Visibility.Visible;
+        return Visibility.Hidden;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        throw new NotSupportedException();
+    }
+}

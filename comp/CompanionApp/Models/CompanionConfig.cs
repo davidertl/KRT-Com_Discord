@@ -22,6 +22,8 @@ public class CompanionConfig
 
     // App settings
     public bool AutoConnect { get; set; } = true;
+    public bool StartMinimized { get; set; } = false;
+    public bool LaunchOnStartup { get; set; } = false;
     public bool SaveRadioActiveState { get; set; } = true;
     public bool TurnOnEmergencyOnStartup { get; set; } = true;
     public bool DebugLoggingEnabled { get; set; } = false;

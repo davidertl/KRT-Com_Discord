@@ -1,5 +1,5 @@
 ﻿CompanionApp
-
+1.0.0.0
 
 winexe
 C#
@@ -12,9 +12,9 @@ TRACE;DEBUG;NET;NET10_0;NETCOREAPP;WINDOWS;WINDOWS7_0;NET5_0_OR_GREATER;NET6_0_O
 C:\Users\micro\OneDrive\Dokumente\GitHub\KRT-Com_Discord\comp\CompanionApp\App.xaml
 11407045341
 
-15868501916
+171387793714
 221-1609838065
 MainWindow.xaml;
 
-False
+True
 

@@ -1,23 +1,32 @@
 # High priority:
-(✔) make the tx and rx beep of emergency radio more signficant, so that it is clear that the emergency radio is active. maybe also add a visual indicator in the companion app.
-  > FIXED: Emergency beeps redesigned — TX start: ascending 3-tone siren (1200→1500→1800 Hz) with boosted volume (0.55–0.6). TX end: descending 3-tone (1500→1200→900 Hz). RX: rapid triple-pulse (1600→1600→1800 Hz). All emergency tones ~2x louder than regular beeps. PlayBeep now accepts optional volumeMultiplier param.
-(✔) add a recent to the emergency radio - when sending an emergency call (ptt on Emergency Radio) it should show in the companion app who sent the call and which frequency he is active on. max display 911 and max 3 other radio id's (if the user who is sending the emergency call is active on more than 3 frequencies, then just show the 3 most active ones).
-On emergendy radio in the ui the calling person should be highlighted in the black window on the right hand side of the green Channel-ID-Display.
-  > FIXED: Emergency radio panel now has a black recent-callers display (#111111 background) right of the frequency display. Shows "Recent:" header in red + last 3 callers in orange (#FF6644, bold). Uses existing RecentTransmissions/AddTransmission infrastructure from RadioPanelViewModel. MinWidth 140px. 
--> it still does not show the frequencys on which the caller is active, but it shows the caller's name
-(✔) WebSocket /voice returns 403 — DSGVO HTTPS enforcement blocks WebSocket upgrades through Traefik
-  > FIXED: Three issues resolved:
-  > 1. Traefik routes.yml was empty (missing router rules, service URL, middleware config) — now generates complete config with Host rule, certResolver, loadBalancer pointing to backend port.
-  > 2. Traefik traefik.yml had incomplete ACME config (missing email, storage, httpChallenge) and no HTTP→HTTPS redirect — now fully configured.
-  > 3. index.js upgrade handler DSGVO check didn't properly detect HTTPS from Traefik — now checks X-Forwarded-Proto only from loopback connections (Traefik). Same fix applied to http.js Express middleware.
+- reconnect logic: auto-reconnect voice WebSocket on disconnect without requiring PTT press
+- change the beep at the end of a push-to-talk session to a hissing noice like a walkie talkie.
+- voice ducking with a slider. 
+    - when the slider is at 100% the voice ducking is disabled and the received audio is played at full volume. 
+    - when the slider is at 0% the voice ducking is fully enabled and the received audio is completely muted while transmitting. 
+    - intermediate values would reduce the volume of the received audio proportionally while transmitting, allowing users to find a comfortable balance between hearing others and being heard themselves.
+    - please let the user choose which audio should be ducked (e.g. only discord, or all audio). This could be implemented by allowing users to select specific audio sources or applications in the companion app settings, and then applying the ducking effect only to those selected sources when transmitting on the radio.
 # Medium priority: 
-
+- Derzeit werden Sprachdaten zwar über TLS zum Server gesendet, aber auf der Strecke zwischen Server und Clients über UDP ausgetauscht. Um ein wirklich verschlüsseltes Funksystem zu erreichen, sollte die Audio-Übertragung selbst Ende-zu-Ende oder zumindest Ende-zu-Server-zu-Ende verschlüsselt werden. Eine Erweiterung wäre, pro Funk-Frequenz einen verschlüsselten Sprachkanal einzurichten. Praktisch könnte das so aussehen: Beim Frequenzbeitritt erzeugt der Server oder die Clients einen zufälligen Session-Schlüssel (z.B. via sicheren Diffie-Hellman-Austausch oder vom Server generiert und über den TLS-gesicherten WebSocket verteilt). Alle Teilnehmer dieser Frequenz verwenden diesen Schlüssel, um die Opus-Audiopakete vor dem Versand zu verschlüsseln (und entsprechend nach Empfang zu entschlüsseln). Der Server würde die verschlüsselten Pakete lediglich weiterleiten, ohne sie selbst zu decodieren. So wären die Audioinhalte auch dann vertraulich, wenn jemand den UDP-Datenverkehr abhört. Diese zusätzliche Verschlüsselung könnte optional oder für bestimmte als sensibel markierte Frequenzen aktiviert werden. Im Projekt-Backlog ist bereits ein ähnliches Konzept vorgesehen (“Zusätzliche Verschlüsselung per Keyphrase”). Die Implementierung lässt sich mit begrenztem Aufwand ergänzen, da auf Client-Seite dank der bestehenden Concentus-Bibliothek bereits Byte-Buffer der Audiopakete vorliegen – diese könnten vor dem Senden mit z.B. AES-GCM symmetrisch verschlüsselt werden. Wichtig ist, einen Schlüsselaustausch-Mechanismus zu integrieren, der in die bestehende WebSocket-Kontrollverbindung passt (z.B. als Teil der Authentifizierung beim Frequenzbeitritt). Insgesamt würde diese Maßnahme die Vertraulichkeit der Sprachkommunikation erheblich stärken, ohne die grundlegende Architektur (WebSocket-Steuerkanal + UDP-Datenkanal) zu verändern.
 # Low priority:
 -ingame overlay wer zuletzt auf welcher Frequenz gefunkt hat. 
     -essentiell mit on/off toggle im "App Settings" Tab
     -frage bitte bevor du dieses Projekt anfängst nach deutlichen Instruktionen. 
     -optional mit Rang (kann erst später implementiert werden, wenn ich weiß wie das Kartell die Daten angelegt hat)
-
+# Wunschliste:
+-speech priority by user rank
+  - sync user rank from discord roles (custom table which lists discord groupid and corresponding rank in the app)
+    -discord roles that have no corresponding rank in the app should be ignored, so that they don't get assigned a default rank.
+  - alternative option in service.sh to manually assign ranks to users (can we safeley search for a discordusername [not discordservernickname]) this setting should be higher and not rewritten by discord role sync.
+  - when adding the priority feature please check discord channel names for the number in "[]" and use that as the minimum rank required to send or to recieve voice on a channel. (e.g. [3] means that only users with rank 3 or higher can send or receive voice on this channel)
+  -with this we need to implement key load per frequency, so that users only ativea the radio on frequencies they have access to. This would reduce bandwidth and improve performance for users with lower ranks who may have access to fewer channels.
+- Optioale Störgeräusche (as a option in the companion app settings) to simulate walkie-talkie communication, such as static, interference, or a squelch effect when no one is transmitting. This would enhance the immersion and authenticity of the radio communication experience. The noise could be generated locally on the client side and mixed with the received audio stream, allowing users to adjust the intensity or type of noise according to their preferences.
+-overlay injection: an in-game overlay that shows who is currently transmitting on which frequency, with an on/off toggle in the "App Settings" tab. This would provide users with real-time information about active communications and help them identify who is speaking without needing to check the companion app. The overlay could display the username and rank of the speaker, as well as the frequency they are using. This feature would enhance situational awareness and improve coordination among users, especially in larger groups or during complex operations. It would be important to ensure that the overlay is unobtrusive and can be easily toggled on or off based on user preference.
+add a checkmark for showing the rank.
+optional add the checkmark to this setting to add the keybind for the radio.
+-ElgatoStreamDeck integration: Implementing integration with Elgato Stream Deck to allow users to control their radio communication (e.g., push-to-talk, frequency switching, profiles) directly from their Stream Deck device. This would provide a convenient and customizable way for users to manage their radio interactions without needing to switch between applications or use keyboard shortcuts. The integration could include features such as assigning specific buttons for different frequencies, toggling the radio on/off, or even displaying real-time information about active communications. This would enhance the user experience and make it easier for streamers and gamers to incorporate the radio system into their workflow.
+-add a webSocket API for controlling the radio from external applications (e.g., Stream Deck, custom scripts). This API would allow users to send commands to the radio system, such as changing frequencies, toggling push-to-talk, adjusting volume levels, or applying specific profiles. By providing a standardized interface for external control, users could integrate the radio system with various tools and platforms, enhancing its versatility and usability. The API could be secured with authentication tokens to ensure that only authorized applications can control the radio, and it could support both RESTful endpoints for simple commands and WebSocket connections for real-time updates and interactions.
+-profiles for channel settings: allowing users to create and save profiles for different channel configurations (e.g., specific frequencies, volume levels, ducking settings) that can be quickly applied based on their current activity or preferences. This would enable users to easily switch between different setups for various scenarios, such as gaming sessions, streaming, or casual communication. The profiles could be managed through the companion app, with options to create, edit, and delete profiles as needed. This feature would enhance the flexibility and usability of the radio system, allowing users to tailor their experience to their specific needs and preferences.
 
 # Security Audit and debugging:
 check security autit notes and check which ones are already fixed, for the one thar are fixed mark them as fixed.
@@ -25,41 +34,8 @@ check security autit notes and check which ones are already fixed, for the one t
 Security Audit Notes (as of 2025-02-17, updated 2026-02-09):
 Security:
 
-  Critical:
-
-  -Most REST endpoints have zero authentication.
-    > Partial Fix: Auth endpoints require signed token (Bearer header). Public endpoints limited to /server-status and /privacy-policy. Admin endpoints require x-admin-token. Freq/TX endpoints still use self-reported identity.
-  
-  High:
-  - (✓) ws WebSocket hub has no authentication.
-    > FIXED: /ws hub now requires a valid auth token in query string (?token=...). Connections without valid token are closed with code 4001. Function signature updated to accept tokenSecret.
-  - (✓) No rate limiting on any HTTP endpoint or WebSocket auth.
-    > FIXED: Global rate limiter (200 req / 15 min) added via express-rate-limit. Auth-specific rate limiter (10 req / 1 min) applied to /auth/login, /auth/discord/redirect, /auth/discord/poll.
-  - (✓) No concurrent session limit per user.
-    > FIXED: Voice relay handleAuth now limits to 3 concurrent sessions per discordUserId. Excess connections receive auth_error "too many concurrent sessions".
-  - (✓) No CORS policy on Express server.
-    > FIXED: CORS middleware added — rejects requests with browser Origin header (desktop app has no Origin). Allows non-browser clients.
-  - (✓) No WebSocket origin checking on voice.js or ws.js.
-    > FIXED: WebSocket upgrade handler rejects connections that include a browser Origin header (403 Forbidden + socket.destroy).
-  
-  Medium:
-  -Discord bot token in plaintext .env file (permissions 600 is OK but still cleartext).
-   -> can we store this somehow encrypted?
-    > Still open.
-
   -Session tokens stored unhashed in SQLite voice_sessions table.
-  - (✓) /freq/join and /freq/leave missing freqId range validation (1000-9999).
-    > FIXED: Both REST routes and voice relay handleJoin validate freqId as integer in range 1000-9999. Out-of-range values return 400 Bad Request.
-  - (✓) limit query parameter not sanitized against NaN.
-    > FIXED: All 4 occurrences (GET /admin/log, /admin/freqs, /admin/bans, /admin/users) now use parseInt + Number.isFinite with fallback defaults.
-  - (✓) No Express security headers (helmet middleware missing).
-    > FIXED: helmet() middleware added to Express app for security headers (X-Content-Type-Options, X-Frame-Options, etc.).
-  (✔) Client VoiceHost/VoicePort not validated before use.
-    > FIXED: VoiceService.ConnectAsync now validates host (non-empty) and port (1–65535) with ArgumentException/ArgumentOutOfRangeException before connecting.
-  (✔) Debug log writes sensitive connection parameters in plaintext.
-    > FIXED: ConnectVoiceAsync LogDebug no longer logs userId or guildId. Only host and port are logged.
-  (✔) Command injection risk in install.sh interactive menu (user input interpolated into curl -d JSON).
-    > FIXED: Added json_escape() helper to service.sh (escapes backslashes, quotes, control chars). Applied to all user-input curl -d payloads: delete-user, delete-guild, ban, unban, delete-and-ban, TX event action. Numeric inputs (freqId, hours) validated with regex before use.
+  
 
 # To-Do / Changelog
 

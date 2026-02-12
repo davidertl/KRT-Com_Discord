@@ -25,10 +25,6 @@ public class FreqAudioSettings
     public float Volume { get; set; } = 1.0f;
     public float Pan { get; set; } = 0.5f; // 0=full left, 0.5=center, 1=full right
     public bool Muted { get; set; }
-    /// <summary>
-    /// Per-frequency ducking multiplier. -1 = use global default, 0.0-1.0 = custom.
-    /// </summary>
-    public float DuckingLevel { get; set; } = -1f;
 }
 
 /// <summary>
@@ -175,17 +171,6 @@ public sealed class VoiceService : IDisposable
     /// Notify VoiceService that an RX stream stopped on some frequency.
     /// </summary>
     public void NotifyRxStop() { var v = Interlocked.Decrement(ref _activeRxCount); if (v < 0) Interlocked.Exchange(ref _activeRxCount, 0); }
-
-    /// <summary>
-    /// Set per-frequency ducking level. -1 = use global default, 0-100 = custom.
-    /// </summary>
-    public void SetFreqDucking(int freqId, int duckingLevel)
-    {
-        float level = duckingLevel < 0 ? -1f : Math.Clamp(duckingLevel / 100f, 0f, 1f);
-        _freqSettings.AddOrUpdate(freqId,
-            _ => new FreqAudioSettings { DuckingLevel = level },
-            (_, s) => { s.DuckingLevel = level; return s; });
-    }
 
     /// <summary>
     /// Set per-frequency audio settings (volume, pan, mute).
@@ -654,25 +639,13 @@ public sealed class VoiceService : IDisposable
 
         float vol = (settings?.Volume ?? 1.0f) * _masterOutputVolume;
 
-        // Apply voice ducking
-        if (_duckingEnabled)
+        // Apply voice ducking: reduce RX volume while transmitting (duck-on-send only).
+        // Note: duck-on-receive does NOT reduce internal radio audio — the point of
+        // duck-on-receive is to hear the radio better by reducing *external* apps.
+        // Only duck-on-send belongs here (reduce other radios while you talk).
+        if (_duckingEnabled && _isTransmitting && _duckOnSend)
         {
-            bool applyDuck = false;
-
-            // Duck-on-send: reduce RX volume while transmitting
-            if (_isTransmitting && _duckOnSend)
-                applyDuck = true;
-
-            // Duck-on-receive: reduce RX volume while any frequency is receiving audio from others
-            if (_duckOnReceive && _activeRxCount > 0)
-                applyDuck = true;
-
-            if (applyDuck)
-            {
-                // Use per-frequency ducking if set, otherwise fall back to global
-                float duckMul = (settings?.DuckingLevel >= 0f) ? settings.DuckingLevel : _duckingMultiplier;
-                vol *= duckMul;
-            }
+            vol *= _duckingMultiplier;
         }
 
         float pan = settings?.Pan ?? 0.5f;

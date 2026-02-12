@@ -678,6 +678,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         // Initialize audio ducking service
         _audioDuckingService = new AudioDuckingService();
+        _audioDuckingService.Log = msg => LogDebug(msg);
 
         // Initialize 8 radio panels with default names
         for (int i = 0; i < 8; i++)
@@ -1341,7 +1342,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 panel.Balance = state.Balance;
                 panel.IsMuted = state.IsMuted;
                 panel.IncludedInBroadcast = state.IncludedInBroadcast;
-                panel.DuckingLevel = state.DuckingLevel;
             }
         }
 
@@ -1352,7 +1352,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             EmergencyRadio.Balance = config.EmergencyRadioState.Balance;
             EmergencyRadio.IsMuted = config.EmergencyRadioState.IsMuted;
             EmergencyRadio.IsEnabled = config.EmergencyRadioState.IsEnabled;
-            EmergencyRadio.DuckingLevel = config.EmergencyRadioState.DuckingLevel;
         }
 
         Bindings.Clear();
@@ -1468,8 +1467,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             IsMuted = p.IsMuted,
             Volume = p.Volume,
             Balance = p.Balance,
-            IncludedInBroadcast = p.IncludedInBroadcast,
-            DuckingLevel = p.DuckingLevel
+            IncludedInBroadcast = p.IncludedInBroadcast
         }).ToList();
 
         _config.EmergencyRadioState = new Models.RadioState
@@ -1478,8 +1476,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             IsEnabled = EmergencyRadio.IsEnabled,
             IsMuted = EmergencyRadio.IsMuted,
             Volume = EmergencyRadio.Volume,
-            Balance = EmergencyRadio.Balance,
-            DuckingLevel = EmergencyRadio.DuckingLevel
+            Balance = EmergencyRadio.Balance
         };
     }
 
@@ -2078,7 +2075,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void OnRadioPanelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (sender is not RadioPanelViewModel panel) return;
-        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled" or "DuckingLevel")
+        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled")
         {
             PushRadioSettingsToVoice(panel);
 
@@ -2173,7 +2170,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
 
         _voice.SetFreqSettings(panel.FreqId, panel.Volume / 100f, panel.Balance / 100f, effectiveMuted);
-        _voice.SetFreqDucking(panel.FreqId, panel.DuckingLevel);
     }
 
     private void PushAllRadioSettingsToVoice()

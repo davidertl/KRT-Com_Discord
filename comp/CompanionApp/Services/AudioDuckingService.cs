@@ -41,6 +41,9 @@ public sealed class AudioDuckingService : IDisposable
     private readonly object _lock = new();
     private bool _isDucked;
 
+    /// <summary>Optional log callback for diagnostic output.</summary>
+    public Action<string>? Log { get; set; }
+
     /// <summary>
     /// Configure which external applications should be ducked.
     /// </summary>
@@ -55,6 +58,7 @@ public sealed class AudioDuckingService : IDisposable
                 foreach (var name in selectedProcessNames)
                     _selectedProcessNames.Add(name);
             }
+            Log?.Invoke($"[Ducking] Targets set: mode={_mode} selected=[{string.Join(", ", _selectedProcessNames)}]");
         }
     }
 
@@ -65,8 +69,16 @@ public sealed class AudioDuckingService : IDisposable
     {
         lock (_lock)
         {
-            if (_mode == DuckingTargetMode.RadioOnly) return;
-            if (_isDucked) return; // already ducking
+            if (_mode == DuckingTargetMode.RadioOnly)
+            {
+                Log?.Invoke($"[Ducking] ApplyDucking skipped: mode=RadioOnly");
+                return;
+            }
+            if (_isDucked)
+            {
+                Log?.Invoke($"[Ducking] ApplyDucking skipped: already ducked");
+                return;
+            }
 
             try
             {
@@ -74,6 +86,9 @@ public sealed class AudioDuckingService : IDisposable
                 var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
                 var sessionManager = device.AudioSessionManager;
                 var sessions = sessionManager.Sessions;
+                int duckedCount = 0;
+
+                Log?.Invoke($"[Ducking] ApplyDucking: multiplier={duckingMultiplier:F2} mode={_mode} sessions={sessions.Count}");
 
                 for (int i = 0; i < sessions.Count; i++)
                 {
@@ -96,19 +111,23 @@ public sealed class AudioDuckingService : IDisposable
                         // Save original volume and apply ducking
                         float originalVolume = session.SimpleAudioVolume.Volume;
                         _savedVolumes[process.Id] = originalVolume;
-                        session.SimpleAudioVolume.Volume = originalVolume * duckingMultiplier;
+                        float newVolume = originalVolume * duckingMultiplier;
+                        session.SimpleAudioVolume.Volume = newVolume;
+                        duckedCount++;
+                        Log?.Invoke($"[Ducking]   Ducked '{processName}' (PID {process.Id}): {originalVolume:F2} → {newVolume:F2}");
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Skip sessions that can't be accessed (e.g., process exited)
+                        Log?.Invoke($"[Ducking]   Session {i} error: {ex.Message}");
                     }
                 }
 
                 _isDucked = true;
+                Log?.Invoke($"[Ducking] ApplyDucking done: {duckedCount} sessions ducked");
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore errors during ducking — audio still works, just not ducked
+                Log?.Invoke($"[Ducking] ApplyDucking FAILED: {ex.Message}");
             }
         }
     }
@@ -120,8 +139,13 @@ public sealed class AudioDuckingService : IDisposable
     {
         lock (_lock)
         {
-            if (!_isDucked) return;
+            if (!_isDucked)
+            {
+                Log?.Invoke($"[Ducking] RestoreDucking skipped: not currently ducked");
+                return;
+            }
 
+            int restoredCount = 0;
             try
             {
                 using var enumerator = new MMDeviceEnumerator();
@@ -140,22 +164,25 @@ public sealed class AudioDuckingService : IDisposable
                         if (_savedVolumes.TryGetValue(process.Id, out float originalVolume))
                         {
                             session.SimpleAudioVolume.Volume = originalVolume;
+                            restoredCount++;
+                            Log?.Invoke($"[Ducking]   Restored '{process.ProcessName}' (PID {process.Id}): → {originalVolume:F2}");
                         }
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Process may have exited — skip gracefully
+                        Log?.Invoke($"[Ducking]   Restore session {i} error: {ex.Message}");
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore errors during restore
+                Log?.Invoke($"[Ducking] RestoreDucking FAILED: {ex.Message}");
             }
             finally
             {
                 _savedVolumes.Clear();
                 _isDucked = false;
+                Log?.Invoke($"[Ducking] RestoreDucking done: {restoredCount} sessions restored");
             }
         }
     }

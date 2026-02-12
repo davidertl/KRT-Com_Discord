@@ -54,7 +54,7 @@ public class CompanionConfig
     /// <summary>
     /// Ducking mode: 0 = Radio audio only, 1 = Selected apps, 2 = All audio except KRT-Com.
     /// </summary>
-    public int DuckingMode { get; set; } = 0;
+    public int DuckingMode { get; set; } = 2;
     /// <summary>
     /// Process names selected for ducking when DuckingMode == 1.
     /// </summary>
@@ -83,8 +83,4 @@ public class RadioState
     public int Volume { get; set; } = 100;
     public int Balance { get; set; } = 50;
     public bool IncludedInBroadcast { get; set; }
-    /// <summary>
-    /// Per-radio ducking level 0-100. -1 means "use global default".
-    /// </summary>
-    public int DuckingLevel { get; set; } = -1;
 }

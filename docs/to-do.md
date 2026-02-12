@@ -95,10 +95,22 @@ Security:
 - [x] **VoiceService pong validation**: Heartbeat loop now tracks last pong timestamp and reconnects after 30s timeout.
 - [x] **.gitignore**: Added `**/bin/` and `**/obj/` patterns for .NET build artifacts.
 
+## Fixed (Alpha 0.0.6 — Voice Ducking & Muted TX Guard)
+
+- [x] **Voice ducking system**: Full ducking pipeline with global slider (0–100%), enable/disable toggle, and per-radio ducking level override (checkbox + slider in each radio panel).
+- [x] **Duck-on-send / duck-on-receive checkboxes**: Users can independently choose to duck when transmitting, when receiving, or both.
+- [x] **Duck-on-receive is external-only**: Ducking on receive only affects external applications (via WASAPI AudioSessionAPI), never the internal radio audio being received.
+- [x] **External app ducking via AudioDuckingService**: WASAPI-based ducking of external applications with three target modes: Radio audio only / Selected apps / All audio except KRT-Com.
+- [x] **Internal radio ducking on send**: Received radio audio volume is reduced by the ducking multiplier while the user is transmitting.
+- [x] **Separate ducking card in App Settings**: Dedicated UI card with enable toggle, send/receive checkboxes, global slider, ducking target selector, and process picker.
+- [x] **Per-radio ducking level**: Each radio panel has a checkbox to override the global ducking level with a custom per-radio slider.
+- [x] **Ducking settings persistence**: All ducking settings (enabled, send/receive, level, mode, process list, per-radio overrides) saved to config and re-pushed on reconnect.
+- [x] **Debug logging for ducking events**: `[Ducking]`-prefixed log entries for TX start/stop, RX start/stop, apply/restore, and level changes.
+- [x] **Muted TX guard**: Transmitting on a muted frequency is blocked (except for broadcasts).
+
 ## Open
 
 - [ ] Reconnect logic: auto-reconnect voice WebSocket on disconnect without requiring PTT press
 - [ ] Connection pooling: keep a single voice connection alive across PTT presses instead of connecting per-press
-- [ ] service.sh: fix `show_dsgvo_warnings` — dangling `fi` without matching `if`
 
 

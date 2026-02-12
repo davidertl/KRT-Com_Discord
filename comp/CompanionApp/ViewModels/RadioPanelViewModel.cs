@@ -68,7 +68,6 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     private bool _includedInBroadcast;
     private int _listenerCount;
     private bool _hasUnsavedChanges;
-    private int _duckingLevel = -1; // -1 = use global default
 
     // Last transmissions (3 for normal radios, 5 for emergency)
     public ObservableCollection<RecentTransmissionEntry> RecentTransmissions { get; } = new();
@@ -231,32 +230,6 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     {
         get => _listenerCount;
         set { _listenerCount = value; OnPropertyChanged(); }
-    }
-
-    /// <summary>
-    /// Per-radio ducking level. -1 = use global default, 0-100 = custom level.
-    /// </summary>
-    public int DuckingLevel
-    {
-        get => _duckingLevel;
-        set { _duckingLevel = value; OnPropertyChanged(); OnPropertyChanged(nameof(DuckingLevelText)); OnPropertyChanged(nameof(UsesCustomDucking)); MarkChanged(); }
-    }
-
-    public string DuckingLevelText => _duckingLevel < 0 ? "Default" : $"{_duckingLevel}%";
-    public bool UsesCustomDucking
-    {
-        get => _duckingLevel >= 0;
-        set
-        {
-            if (value && _duckingLevel < 0)
-            {
-                DuckingLevel = 50; // default custom level
-            }
-            else if (!value && _duckingLevel >= 0)
-            {
-                DuckingLevel = -1; // revert to global default
-            }
-        }
     }
 
     public bool HasUnsavedChanges

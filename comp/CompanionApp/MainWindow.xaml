@@ -180,6 +180,9 @@
                   <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                     <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
                   </DataTrigger>
+                  <DataTrigger Binding="{Binding IsVoiceReconnecting}" Value="True">
+                    <Setter Property="Fill" Value="{StaticResource AccentYellow}"/>
+                  </DataTrigger>
                 </Style.Triggers>
               </Style>
             </Ellipse.Style>
@@ -315,6 +318,7 @@
                           <RowDefinition Height="Auto"/>
                           <RowDefinition Height="Auto"/>
                           <RowDefinition Height="Auto"/>
+                          <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <!-- Header Row -->
@@ -422,8 +426,30 @@
                           </StackPanel>
                         </Grid>
 
+                        <!-- Per-Radio Ducking Row -->
+                        <Grid Grid.Row="3" Margin="0,0,0,8"
+                              Visibility="{Binding DataContext.DuckingEnabled, RelativeSource={RelativeSource AncestorType=TabControl}, Converter={StaticResource BoolToVis}}">
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="45"/>
+                          </Grid.ColumnDefinitions>
+                          <TextBlock Text="Duck" Foreground="{StaticResource TextSecondary}" FontSize="10" 
+                                     VerticalAlignment="Center" Margin="0,0,6,0"/>
+                          <CheckBox Grid.Column="1" IsChecked="{Binding UsesCustomDucking}" VerticalAlignment="Center" 
+                                    Margin="0,0,6,0" ToolTip="Override global ducking level for this radio"/>
+                          <Slider Grid.Column="2" Minimum="0" Maximum="100" 
+                                  Value="{Binding DuckingLevel}" VerticalAlignment="Center"
+                                  IsEnabled="{Binding UsesCustomDucking}"
+                                  ToolTip="Per-radio ducking level (overrides global setting)"/>
+                          <TextBlock Grid.Column="3" Text="{Binding DuckingLevelText}" FontSize="10"
+                                     Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" 
+                                     HorizontalAlignment="Right"/>
+                        </Grid>
+
                         <!-- Hotkey Row -->
-                        <Grid Grid.Row="3" Margin="0,0,0,8">
+                        <Grid Grid.Row="4" Margin="0,0,0,8">
                           <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -439,7 +465,7 @@
                         </Grid>
 
                         <!-- Recent Transmissions -->
-                        <StackPanel Grid.Row="4">
+                        <StackPanel Grid.Row="5">
                           <TextBlock Text="Recent:" Foreground="{StaticResource TextSecondary}" FontSize="9" Margin="0,0,0,2"/>
                           <ItemsControl ItemsSource="{Binding RecentTransmissions}" MaxHeight="40">
                             <ItemsControl.ItemTemplate>
@@ -639,8 +665,8 @@
                 <TextBlock Text="{Binding DebugLogFilePath}" Foreground="{StaticResource TextSecondary}" 
                            FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"/>
                 <CheckBox Content="Enable Emergency Radio" Foreground="{StaticResource TextSecondary}" 
-                          IsChecked="{Binding EnableEmergencyRadio}" Margin="0,0,0,15"/>
-                
+                          IsChecked="{Binding EnableEmergencyRadio}" Margin="0,0,0,10"/>
+
                 <TextBlock Text="Startup" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,10"/>
                 <CheckBox Content="Save active state from radios for next startup" Foreground="{StaticResource TextSecondary}" 
                           IsChecked="{Binding SaveRadioActiveState}" Margin="0,0,0,10"
@@ -648,6 +674,111 @@
                 <CheckBox Content="Turn on Emergency radio on startup" Foreground="{StaticResource TextSecondary}" 
                           IsChecked="{Binding TurnOnEmergencyOnStartup}" Margin="0,0,0,10"
                           IsEnabled="{Binding EnableEmergencyRadio}"/>
+              </StackPanel>
+            </Border>
+
+            <!-- Voice Ducking Card -->
+            <Border Background="{StaticResource BackgroundMedium}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Voice Ducking" Foreground="{StaticResource AccentBlue}" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                <TextBlock Text="Reduce audio volume during voice activity." 
+                           Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,10"/>
+
+                <CheckBox Content="Enable ducking" Foreground="{StaticResource TextSecondary}"
+                          IsChecked="{Binding DuckingEnabled}" Margin="0,0,0,8"/>
+
+                <!-- When to duck -->
+                <StackPanel Margin="18,0,0,12" IsEnabled="{Binding DuckingEnabled}">
+                  <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                      <Setter Property="Opacity" Value="1"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding DuckingEnabled}" Value="False">
+                          <Setter Property="Opacity" Value="0.45"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </StackPanel.Style>
+                  <CheckBox Content="Duck when sending (PTT held)" Foreground="{StaticResource TextSecondary}"
+                            IsChecked="{Binding DuckOnSend}" Margin="0,0,0,4"
+                            ToolTip="Reduce audio while you are transmitting"/>
+                  <CheckBox Content="Duck when receiving" Foreground="{StaticResource TextSecondary}"
+                            IsChecked="{Binding DuckOnReceive}" Margin="0,0,0,0"
+                            ToolTip="Reduce audio while someone else is transmitting on your radio"/>
+                </StackPanel>
+
+                <!-- Controls below are enabled only when ducking is on -->
+                <StackPanel IsEnabled="{Binding DuckingEnabled}">
+                  <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                      <Setter Property="Opacity" Value="1"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding DuckingEnabled}" Value="False">
+                          <Setter Property="Opacity" Value="0.45"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </StackPanel.Style>
+
+                  <TextBlock Text="Global Ducking Level" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,4"/>
+                  <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="45"/>
+                    </Grid.ColumnDefinitions>
+                    <Slider Grid.Column="0" Minimum="0" Maximum="100" Value="{Binding DuckingLevel}" 
+                            VerticalAlignment="Center" TickFrequency="25" IsSnapToTickEnabled="False"
+                            ToolTip="100% = no ducking, 0% = fully muted while transmitting"/>
+                    <TextBlock Grid.Column="1" Text="{Binding DuckingLevelText}" Foreground="{StaticResource TextSecondary}" 
+                               VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12"/>
+                  </Grid>
+
+                  <TextBlock Text="Ducking Target" Foreground="{StaticResource TextSecondary}" FontSize="11" Margin="0,0,0,5"/>
+                  <ComboBox SelectedIndex="{Binding DuckingMode}" Width="280" HorizontalAlignment="Left" Margin="0,0,0,10">
+                    <ComboBoxItem Content="Radio audio only"/>
+                    <ComboBoxItem Content="Selected apps"/>
+                    <ComboBoxItem Content="All audio except KRT-Com"/>
+                  </ComboBox>
+
+                  <!-- Ducked process selector (visible when mode = "Selected apps") -->
+                  <StackPanel Margin="0,0,0,4">
+                    <StackPanel.Style>
+                      <Style TargetType="StackPanel">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding ShowDuckedProcessSelector}" Value="True">
+                            <Setter Property="Visibility" Value="Visible"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </StackPanel.Style>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                      <TextBlock Text="Select apps to duck:" Foreground="{StaticResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                      <Button Content="Refresh" Style="{StaticResource ModernButton}" Click="RefreshAudioSessions_Click"
+                              Margin="10,0,0,0" Padding="8,3" FontSize="11"/>
+                    </StackPanel>
+                    <Border Background="#1A1A2A" CornerRadius="4" Padding="8" MaxHeight="150">
+                      <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding AvailableAudioSessions}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <CheckBox Content="{Binding ProcessName}" IsChecked="{Binding IsSelected}"
+                                        Foreground="{StaticResource TextSecondary}" Margin="0,2"
+                                        Click="DuckedProcessCheckBox_Click"/>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </ScrollViewer>
+                    </Border>
+                  </StackPanel>
+
+                  <TextBlock Text="'Radio audio only' ducks other radio channels during voice activity. Select 'Selected apps' or 'All audio except KRT-Com' to also duck external applications." 
+                             Foreground="{StaticResource TextSecondary}" FontSize="10" FontStyle="Italic" 
+                             TextWrapping="Wrap" Margin="0,6,0,0"/>
+                  <TextBlock Text="Per-radio ducking overrides can be set in each radio panel on the Radio tab." 
+                             Foreground="{StaticResource TextSecondary}" FontSize="10" FontStyle="Italic" 
+                             TextWrapping="Wrap" Margin="0,4,0,0"/>
+                </StackPanel>
               </StackPanel>
             </Border>
 
@@ -713,6 +844,9 @@
                         <Style.Triggers>
                           <DataTrigger Binding="{Binding IsVoiceConnected}" Value="True">
                             <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
+                          </DataTrigger>
+                          <DataTrigger Binding="{Binding IsVoiceReconnecting}" Value="True">
+                            <Setter Property="Fill" Value="{StaticResource AccentYellow}"/>
                           </DataTrigger>
                         </Style.Triggers>
                       </Style>

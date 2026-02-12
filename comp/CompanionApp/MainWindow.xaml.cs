@@ -279,4 +279,17 @@ public partial class MainWindow : Window
     {
         _vm.ToggleMuteAllHotkey = "";
     }
+
+    private void RefreshAudioSessions_Click(object sender, RoutedEventArgs e)
+    {
+        _vm.RefreshAudioSessions();
+    }
+
+    private void DuckedProcessCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.CheckBox cb && cb.DataContext is CompanionApp.Services.AudioSessionInfo session)
+        {
+            _vm.ToggleDuckedProcess(session.ProcessName);
+        }
+    }
 }

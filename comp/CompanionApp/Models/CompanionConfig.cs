@@ -33,6 +33,33 @@ public class CompanionConfig
     public int InputVolume { get; set; } = 100;
     public int OutputVolume { get; set; } = 100;
 
+    // Voice ducking settings
+    /// <summary>
+    /// Master toggle: enables/disables the entire ducking feature.
+    /// </summary>
+    public bool DuckingEnabled { get; set; } = false;
+    /// <summary>
+    /// Default ducking level 0-100: 100 = no ducking (disabled), 0 = full mute while TX.
+    /// Used as the default for radios that haven't set a custom level.
+    /// </summary>
+    public int DuckingLevel { get; set; } = 50;
+    /// <summary>
+    /// Apply ducking while the user is transmitting (PTT held).
+    /// </summary>
+    public bool DuckOnSend { get; set; } = true;
+    /// <summary>
+    /// Apply ducking while voice is being received on any active radio.
+    /// </summary>
+    public bool DuckOnReceive { get; set; } = true;
+    /// <summary>
+    /// Ducking mode: 0 = Radio audio only, 1 = Selected apps, 2 = All audio except KRT-Com.
+    /// </summary>
+    public int DuckingMode { get; set; } = 0;
+    /// <summary>
+    /// Process names selected for ducking when DuckingMode == 1.
+    /// </summary>
+    public List<string> DuckedProcessNames { get; set; } = new();
+
     // Per-radio persisted state
     public List<RadioState> RadioStates { get; set; } = new();
 
@@ -56,4 +83,8 @@ public class RadioState
     public int Volume { get; set; } = 100;
     public int Balance { get; set; } = 50;
     public bool IncludedInBroadcast { get; set; }
+    /// <summary>
+    /// Per-radio ducking level 0-100. -1 means "use global default".
+    /// </summary>
+    public int DuckingLevel { get; set; } = -1;
 }

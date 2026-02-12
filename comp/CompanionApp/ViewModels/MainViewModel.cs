@@ -25,7 +25,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private BackendClient? _backend;
     private AudioCaptureService? _audio;
     private VoiceService? _voice;
+    private ReconnectManager? _reconnect;
     private BeepService? _beepService;
+    private AudioDuckingService? _audioDuckingService;
     private CancellationTokenSource? _streamCts;
     private RadioPanelViewModel? _activeRadio;
     private HashSet<RadioPanelViewModel> _activeBroadcastRadios = new();
@@ -246,8 +248,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public string VoiceConnectionIndicator => IsVoiceConnected ? "Connected" : "Disconnected";
+    public string VoiceConnectionIndicator => IsVoiceConnected ? "Connected" 
+        : (_voiceConnectionState == VoiceConnectionState.Reconnecting ? "Reconnecting…" 
+        : (_voiceConnectionState == VoiceConnectionState.Failed ? "Reconnect Failed" 
+        : "Disconnected"));
     public string VoiceConnectButtonText => IsVoiceConnected ? "Disconnect" : "Connect";
+
+    private VoiceConnectionState _voiceConnectionState = VoiceConnectionState.Disconnected;
+    public VoiceConnectionState VoiceConnectionState
+    {
+        get => _voiceConnectionState;
+        private set
+        {
+            _voiceConnectionState = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(VoiceConnectionIndicator));
+            OnPropertyChanged(nameof(IsVoiceReconnecting));
+            OnPropertyChanged(nameof(ReconnectStatusColor));
+        }
+    }
+
+    public bool IsVoiceReconnecting => _voiceConnectionState == VoiceConnectionState.Reconnecting;
+
+    /// <summary>Indicator dot color: green=connected, orange=reconnecting, red=disconnected/failed.</summary>
+    public string ReconnectStatusColor => _voiceConnectionState switch
+    {
+        VoiceConnectionState.Connected => "#4AFF9E",
+        VoiceConnectionState.Reconnecting => "#FFD84A",
+        VoiceConnectionState.Connecting => "#FFD84A",
+        _ => "#FF4A4A"
+    };
 
     #endregion
 
@@ -426,6 +456,136 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
     public string OutputVolumeText => $"{_outputVolume}%";
 
+    // Voice ducking enabled
+    private bool _duckingEnabled;
+    public bool DuckingEnabled
+    {
+        get => _duckingEnabled;
+        set
+        {
+            _duckingEnabled = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+            _voice?.SetDuckingEnabled(_duckingEnabled);
+        }
+    }
+
+    // Duck when sending (PTT held)
+    private bool _duckOnSend = true;
+    public bool DuckOnSend
+    {
+        get => _duckOnSend;
+        set
+        {
+            _duckOnSend = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+            _voice?.SetDuckOnSend(_duckOnSend);
+        }
+    }
+
+    // Duck when receiving voice from others
+    private bool _duckOnReceive = true;
+    public bool DuckOnReceive
+    {
+        get => _duckOnReceive;
+        set
+        {
+            _duckOnReceive = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+            _voice?.SetDuckOnReceive(_duckOnReceive);
+            // If disabling duck-on-receive while currently ducked, restore immediately
+            if (!value) RestoreRxDucking();
+        }
+    }
+
+    /// <summary>Number of frequencies currently receiving audio from other users.</summary>
+    private int _activeRxCount;
+
+    // Voice ducking level (0-100, default 50 = moderate ducking)
+    private int _duckingLevel = 50;
+    public int DuckingLevel
+    {
+        get => _duckingLevel;
+        set
+        {
+            _duckingLevel = Math.Clamp(value, 0, 100);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(DuckingLevelText));
+            MarkGlobalChanged();
+            _voice?.SetDuckingLevel(_duckingLevel);
+        }
+    }
+    public string DuckingLevelText => $"{_duckingLevel}%";
+
+    // Voice ducking mode: 0 = Radio audio only, 1 = Selected apps, 2 = All audio except KRT-Com
+    private int _duckingMode;
+    public int DuckingMode
+    {
+        get => _duckingMode;
+        set
+        {
+            _duckingMode = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowDuckedProcessSelector));
+            MarkGlobalChanged();
+            _audioDuckingService?.SetDuckingTargets((DuckingTargetMode)_duckingMode, DuckedProcessNames?.ToList());
+        }
+    }
+
+    public bool ShowDuckedProcessSelector => _duckingMode == 1 && _duckingEnabled;
+
+    // Process names selected for ducking
+    private ObservableCollection<string> _duckedProcessNames = new();
+    public ObservableCollection<string> DuckedProcessNames
+    {
+        get => _duckedProcessNames;
+        set { _duckedProcessNames = value; OnPropertyChanged(); }
+    }
+
+    // Available audio sessions for the process selector
+    private ObservableCollection<AudioSessionInfo> _availableAudioSessions = new();
+    public ObservableCollection<AudioSessionInfo> AvailableAudioSessions
+    {
+        get => _availableAudioSessions;
+        set { _availableAudioSessions = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// Refresh the list of audio sessions available for ducking selection.
+    /// </summary>
+    public void RefreshAudioSessions()
+    {
+        if (_audioDuckingService == null) return;
+        var sessions = _audioDuckingService.GetAudioSessions();
+
+        // Mark sessions that are already selected
+        foreach (var s in sessions)
+            s.IsSelected = DuckedProcessNames.Contains(s.ProcessName);
+
+        AvailableAudioSessions = new ObservableCollection<AudioSessionInfo>(sessions);
+    }
+
+    /// <summary>
+    /// Toggle a process name in the ducked process list.
+    /// </summary>
+    public void ToggleDuckedProcess(string processName)
+    {
+        if (DuckedProcessNames.Contains(processName))
+            DuckedProcessNames.Remove(processName);
+        else
+            DuckedProcessNames.Add(processName);
+
+        MarkGlobalChanged();
+        _audioDuckingService?.SetDuckingTargets((DuckingTargetMode)DuckingMode, DuckedProcessNames.ToList());
+
+        // Update selection state in available sessions
+        foreach (var s in AvailableAudioSessions)
+            s.IsSelected = DuckedProcessNames.Contains(s.ProcessName);
+        OnPropertyChanged(nameof(AvailableAudioSessions));
+    }
+
     private bool _allRadiosMuted;
     public bool AllRadiosMuted
     {
@@ -515,6 +675,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         // Initialize beep service
         _beepService = new BeepService();
         _beepService.SetMasterVolume(_outputVolume / 100f);
+
+        // Initialize audio ducking service
+        _audioDuckingService = new AudioDuckingService();
 
         // Initialize 8 radio panels with default names
         for (int i = 0; i < 8; i++)
@@ -926,6 +1089,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        // NOTE: Broadcasts intentionally do NOT check IsMuted — the to-do spec says
+        // "disable the possibility to transmit on a frequency that is muted except for broadcasts."
+        // Muted radios that are included in broadcast should still transmit.
         var broadcastRadios = RadioPanels
             .Where(r => r.IsEnabled && r.IncludedInBroadcast)
             .ToList();
@@ -978,7 +1144,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _audio.Start();
 
             IsStreaming = true;
-            _beepService?.PlayTalkToAllBeep();
+
+            // Apply external app ducking if configured (duck-on-send)
+            if (DuckingEnabled && _duckOnSend && _duckingLevel < 100 && _duckingMode != 0)
+            {
+                _audioDuckingService?.ApplyDucking(_duckingLevel / 100f);
+                LogDebug($"[Ducking] External duck-on-send (broadcast) applied: level={_duckingLevel}% mode={_duckingMode}");
+            }
+
+            _beepService?.PlayTalkToAllBeep(
+                broadcastRadios.Max(r => r.Volume) / 100f,
+                (float)broadcastRadios.Average(r => r.Balance) / 100f);
         }
         catch (Exception ex)
         {
@@ -1002,6 +1178,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var userName = string.IsNullOrWhiteSpace(LoggedInDisplayName) ? "You" : LoggedInDisplayName;
         var timestamp = $"{DateTime.Now:HH:mm} - {userName} (Broadcast)";
 
+        // Capture vol/pan before clearing the set
+        float bcastVol = _activeBroadcastRadios.Any() ? _activeBroadcastRadios.Max(r => r.Volume) / 100f : 1f;
+        float bcastPan = _activeBroadcastRadios.Any() ? (float)_activeBroadcastRadios.Average(r => r.Balance) / 100f : 0.5f;
+
         foreach (var radio in _activeBroadcastRadios)
         {
             radio.SetBroadcasting(false);
@@ -1014,9 +1194,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         _voice?.StopTransmit();
 
+        // Restore external app ducking (unless duck-on-receive is keeping it active)
+        if (_activeRxCount == 0)
+            _audioDuckingService?.RestoreDucking();
+
         IsBroadcasting = false;
         IsStreaming = false;
-        _beepService?.PlayTxEndBeep();
+        _beepService?.PlayTxEndBeep(bcastVol, bcastPan);
         StatusText = "Broadcast stopped";
 
         await Task.CompletedTask;
@@ -1128,6 +1312,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         DebugLoggingEnabled = config.DebugLoggingEnabled;
         InputVolume = config.InputVolume;
         OutputVolume = config.OutputVolume;
+        DuckingEnabled = config.DuckingEnabled;
+        DuckOnSend = config.DuckOnSend;
+        DuckOnReceive = config.DuckOnReceive;
+        DuckingLevel = config.DuckingLevel;
+        DuckingMode = config.DuckingMode;
+        DuckedProcessNames = new ObservableCollection<string>(config.DuckedProcessNames ?? new List<string>());
+        _audioDuckingService?.SetDuckingTargets((DuckingTargetMode)DuckingMode, DuckedProcessNames?.ToList());
 
         // Load bindings into radio panels
         for (int i = 0; i < RadioPanels.Count && i < config.Bindings.Count; i++)
@@ -1150,6 +1341,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 panel.Balance = state.Balance;
                 panel.IsMuted = state.IsMuted;
                 panel.IncludedInBroadcast = state.IncludedInBroadcast;
+                panel.DuckingLevel = state.DuckingLevel;
             }
         }
 
@@ -1160,6 +1352,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             EmergencyRadio.Balance = config.EmergencyRadioState.Balance;
             EmergencyRadio.IsMuted = config.EmergencyRadioState.IsMuted;
             EmergencyRadio.IsEnabled = config.EmergencyRadioState.IsEnabled;
+            EmergencyRadio.DuckingLevel = config.EmergencyRadioState.DuckingLevel;
         }
 
         Bindings.Clear();
@@ -1258,6 +1451,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.DebugLoggingEnabled = DebugLoggingEnabled;
         _config.InputVolume = InputVolume;
         _config.OutputVolume = OutputVolume;
+        _config.DuckingEnabled = DuckingEnabled;
+        _config.DuckOnSend = DuckOnSend;
+        _config.DuckOnReceive = DuckOnReceive;
+        _config.DuckingLevel = DuckingLevel;
+        _config.DuckingMode = DuckingMode;
+        _config.DuckedProcessNames = DuckedProcessNames?.ToList() ?? new List<string>();
 
         _config.Bindings = Bindings.ToList();
 
@@ -1269,7 +1468,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             IsMuted = p.IsMuted,
             Volume = p.Volume,
             Balance = p.Balance,
-            IncludedInBroadcast = p.IncludedInBroadcast
+            IncludedInBroadcast = p.IncludedInBroadcast,
+            DuckingLevel = p.DuckingLevel
         }).ToList();
 
         _config.EmergencyRadioState = new Models.RadioState
@@ -1278,7 +1478,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             IsEnabled = EmergencyRadio.IsEnabled,
             IsMuted = EmergencyRadio.IsMuted,
             Volume = EmergencyRadio.Volume,
-            Balance = EmergencyRadio.Balance
+            Balance = EmergencyRadio.Balance,
+            DuckingLevel = EmergencyRadio.DuckingLevel
         };
     }
 
@@ -1445,6 +1646,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        // Don't allow transmitting on muted frequencies (except broadcasts)
+        bool effectiveMuted = radio.IsMuted;
+        if (radio.IsEmergencyRadio)
+            effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
+        if (effectiveMuted)
+        {
+            StatusText = $"Cannot transmit — Radio {radio.Label} is muted";
+            return;
+        }
+
         try
         {
             _activeRadio = radio;
@@ -1491,6 +1702,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             // in OnRxStateChanged fires even if the server broadcasts before HTTP responds.
             IsStreaming = true;
 
+            // Apply external app ducking if configured (duck-on-send)
+            if (DuckingEnabled && _duckOnSend && _duckingLevel < 100 && _duckingMode != 0)
+            {
+                _audioDuckingService?.ApplyDucking(_duckingLevel / 100f);
+                LogDebug($"[Ducking] External duck-on-send applied: level={_duckingLevel}% mode={_duckingMode}");
+            }
+            LogDebug($"[Ducking] TX start: enabled={DuckingEnabled} onSend={_duckOnSend} level={_duckingLevel} mode={_duckingMode}");
+
             // Notify backend of TX start (non-fatal if fails)
             try
             {
@@ -1502,9 +1721,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 // Continue - audio capture still works
             }
             if (radio.IsEmergencyRadio)
-                _beepService?.PlayEmergencyTxBeep();
+                _beepService?.PlayEmergencyTxBeep(radio.Volume / 100f, radio.Balance / 100f);
             else
-                _beepService?.PlayTxStartBeep();
+                _beepService?.PlayTxStartBeep(radio.Volume / 100f, radio.Balance / 100f);
         }
         catch (Exception ex)
         {
@@ -1547,6 +1766,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _voice?.StopTransmit();
         // Keep voice connection alive for next PTT
 
+        // Restore external app ducking (unless duck-on-receive is keeping it active)
+        if (_activeRxCount == 0)
+            _audioDuckingService?.RestoreDucking();
+
         _streamCts?.Dispose();
         _streamCts = null;
 
@@ -1559,9 +1782,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         IsStreaming = false;
         if (radio?.IsEmergencyRadio == true)
-            _beepService?.PlayEmergencyTxEndBeep();
+            _beepService?.PlayEmergencyTxEndBeep(radio.Volume / 100f, radio.Balance / 100f);
         else
-            _beepService?.PlayTxEndBeep();
+            _beepService?.PlayTxEndBeep(radio?.Volume / 100f ?? 1f, radio?.Balance / 100f ?? 0.5f);
         StatusText = "PTT stop";
     }
 
@@ -1584,6 +1807,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public async Task ConnectVoiceAsync()
     {
         LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort}");
+
+        // Tear down previous instances
+        if (_reconnect != null)
+        {
+            _reconnect.StateChanged -= OnReconnectStateChanged;
+            _reconnect.Log -= OnReconnectLog;
+            _reconnect.Reconnected -= OnReconnectedAsync;
+            _reconnect.Dispose();
+            _reconnect = null;
+        }
 
         if (_voice != null)
         {
@@ -1613,7 +1846,21 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _voice.SetMasterInputVolume(InputVolume / 100f);
         _voice.SetMasterOutputVolume(OutputVolume / 100f);
 
-        await _voice.ConnectAsync(VoiceHost, VoicePort, DiscordUserId, GuildId, AuthToken);
+        // Set ducking level
+        _voice.SetDuckingLevel(DuckingLevel);
+        _voice.SetDuckingEnabled(DuckingEnabled);
+        _voice.SetDuckOnSend(DuckOnSend);
+        _voice.SetDuckOnReceive(DuckOnReceive);
+
+        // Create and wire ReconnectManager
+        _reconnect = new ReconnectManager(_voice);
+        _reconnect.SetConnectionParams(VoiceHost, VoicePort, DiscordUserId, GuildId, AuthToken);
+        _reconnect.StateChanged += OnReconnectStateChanged;
+        _reconnect.Log += OnReconnectLog;
+        _reconnect.Reconnected += OnReconnectedAsync;
+
+        // Connect via ReconnectManager (which will auto-reconnect on drop)
+        bool connected = await _reconnect.ConnectAsync();
         IsVoiceConnected = _voice.IsConnected;
 
         // Auto-join all enabled radio frequencies so we receive RX notifications and audio
@@ -1640,6 +1887,77 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         LogDebug($"[Voice] ConnectVoiceAsync done: IsConnected={IsVoiceConnected}");
+    }
+
+    /// <summary>
+    /// Called by ReconnectManager after a successful automatic reconnect.
+    /// Re-joins frequencies and pushes audio settings.
+    /// </summary>
+    private async Task OnReconnectedAsync()
+    {
+        LogDebug("[Voice] Reconnected — re-joining frequencies and pushing settings");
+
+        await Application.Current.Dispatcher.InvokeAsync(async () =>
+        {
+            IsVoiceConnected = _voice?.IsConnected ?? false;
+
+            if (_voice == null || !_voice.IsConnected) return;
+
+            // Re-set output device & volumes (playback device may have been cleaned up)
+            _voice.SetOutputDevice(SelectedAudioOutputDevice);
+            _voice.SetMasterInputVolume(InputVolume / 100f);
+            _voice.SetMasterOutputVolume(OutputVolume / 100f);
+
+            // Re-set ducking settings
+            _voice.SetDuckingLevel(DuckingLevel);
+            _voice.SetDuckingEnabled(DuckingEnabled);
+            _voice.SetDuckOnSend(DuckOnSend);
+            _voice.SetDuckOnReceive(DuckOnReceive);
+
+            // Re-join all enabled frequencies
+            foreach (var panel in RadioPanels.Where(r => r.IsEnabled))
+            {
+                await _voice.JoinFrequencyAsync(panel.FreqId);
+                LogDebug($"[Voice] Reconnect re-joined freq {panel.FreqId} ({panel.Label})");
+            }
+            if (EnableEmergencyRadio)
+            {
+                await _voice.JoinFrequencyAsync(EmergencyRadio.FreqId);
+                LogDebug($"[Voice] Reconnect re-joined emergency freq {EmergencyRadio.FreqId}");
+            }
+
+            PushAllRadioSettingsToVoice();
+            await PushAllServerMutesAsync();
+
+            StatusText = "Reconnected successfully";
+        });
+    }
+
+    private void OnReconnectStateChanged(VoiceConnectionState newState)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            VoiceConnectionState = newState;
+            IsVoiceConnected = newState == VoiceConnectionState.Connected;
+
+            switch (newState)
+            {
+                case VoiceConnectionState.Reconnecting:
+                    StatusText = "Connection lost — reconnecting…";
+                    break;
+                case VoiceConnectionState.Failed:
+                    StatusText = "Reconnect failed — click Connect to retry";
+                    break;
+                case VoiceConnectionState.Connected:
+                    // StatusText set by OnReconnectedAsync or VoiceService
+                    break;
+            }
+        });
+    }
+
+    private void OnReconnectLog(string message)
+    {
+        LogDebug($"[Reconnect] {message}");
     }
 
     /// <summary>
@@ -1694,17 +2012,55 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 matchingRadio.AddTransmission(timestamp);
                 matchingRadio.SetReceiving(true);
 
+                // Notify VoiceService so internal duck-on-receive works
+                _voice?.NotifyRxStart();
+
+                // Apply duck-on-receive external ducking (first RX starts ducking)
+                if (DuckingEnabled && _duckOnReceive && _duckingMode != 0 && _duckingLevel < 100)
+                {
+                    _activeRxCount++;
+                    if (_activeRxCount == 1)
+                        _audioDuckingService?.ApplyDucking(_duckingLevel / 100f);
+                }
+                LogDebug($"[Ducking] RX start on freq {freqId}: rxCount={_activeRxCount} enabled={DuckingEnabled} onRecv={_duckOnReceive} mode={_duckingMode}");
+
                 // Play appropriate RX beep
                 if (matchingRadio.IsEmergencyRadio)
-                    _beepService?.PlayEmergencyRxBeep();
+                    _beepService?.PlayEmergencyRxBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
                 else
-                    _beepService?.PlayRxStartBeep();
+                    _beepService?.PlayRxStartBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
             }
             else if (action == "stop")
             {
                 matchingRadio.SetReceiving(false);
+
+                // Notify VoiceService so internal duck-on-receive stops
+                _voice?.NotifyRxStop();
+
+                // Restore duck-on-receive when last RX ends (but not if duck-on-send is active)
+                if (_activeRxCount > 0)
+                {
+                    _activeRxCount--;
+                    if (_activeRxCount == 0 && !IsStreaming)
+                        _audioDuckingService?.RestoreDucking();
+                }
+                LogDebug($"[Ducking] RX stop on freq {freqId}: rxCount={_activeRxCount}");
             }
         });
+    }
+
+    /// <summary>
+    /// Force-restore external ducking caused by RX activity and reset the counter.
+    /// Used when disabling duck-on-receive at runtime.
+    /// </summary>
+    private void RestoreRxDucking()
+    {
+        if (_activeRxCount > 0)
+        {
+            _activeRxCount = 0;
+            if (!IsStreaming) // don't disturb duck-on-send
+                _audioDuckingService?.RestoreDucking();
+        }
     }
 
     private void OnFreqJoined(int freqId, int listenerCount)
@@ -1722,7 +2078,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void OnRadioPanelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (sender is not RadioPanelViewModel panel) return;
-        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled")
+        if (e.PropertyName is "Volume" or "Balance" or "IsMuted" or "IsEnabled" or "DuckingLevel")
         {
             PushRadioSettingsToVoice(panel);
 
@@ -1817,6 +2173,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             effectiveMuted = effectiveMuted || !EnableEmergencyRadio;
 
         _voice.SetFreqSettings(panel.FreqId, panel.Volume / 100f, panel.Balance / 100f, effectiveMuted);
+        _voice.SetFreqDucking(panel.FreqId, panel.DuckingLevel);
     }
 
     private void PushAllRadioSettingsToVoice()
@@ -1830,13 +2187,23 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task DisconnectVoiceAsync()
     {
-        if (_voice != null)
+        if (_reconnect != null)
+        {
+            await _reconnect.DisconnectAsync();
+            _reconnect.StateChanged -= OnReconnectStateChanged;
+            _reconnect.Log -= OnReconnectLog;
+            _reconnect.Reconnected -= OnReconnectedAsync;
+            _reconnect.Dispose();
+            _reconnect = null;
+        }
+        else if (_voice != null)
         {
             await _voice.DisconnectAsync();
             _voice.Dispose();
             _voice = null;
         }
         IsVoiceConnected = false;
+        VoiceConnectionState = VoiceConnectionState.Disconnected;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -1849,6 +2216,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _hook?.Dispose();
         _backend?.Dispose();
         _audio?.Dispose();
+        _audioDuckingService?.Dispose();
+        _reconnect?.Dispose();
         _voice?.Dispose();
         _streamCts?.Dispose();
     }

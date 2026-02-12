@@ -25,6 +25,10 @@ public class FreqAudioSettings
     public float Volume { get; set; } = 1.0f;
     public float Pan { get; set; } = 0.5f; // 0=full left, 0.5=center, 1=full right
     public bool Muted { get; set; }
+    /// <summary>
+    /// Per-frequency ducking multiplier. -1 = use global default, 0.0-1.0 = custom.
+    /// </summary>
+    public float DuckingLevel { get; set; } = -1f;
 }
 
 /// <summary>
@@ -43,6 +47,10 @@ public sealed class VoiceService : IDisposable
     public event Action<int, int>? FreqJoined;
     /// <summary>Raised when server confirms mute/unmute. Args: (freqId, isMuted)</summary>
     public event Action<int, bool>? MuteConfirmed;
+    /// <summary>Raised when the WebSocket drops unexpectedly (not user-initiated).</summary>
+    public event Action? UnexpectedDisconnect;
+    /// <summary>Raised when the WebSocket is successfully opened and authenticated.</summary>
+    public event Action? Connected;
 
     // ---- connection state ----
     private ClientWebSocket? _ws;
@@ -86,9 +94,20 @@ public sealed class VoiceService : IDisposable
     private int _currentFreqId;
     private uint _txSequence;
 
+    // ---- voice ducking (0.0 = full mute while TX, 1.0 = no ducking) ----
+    private float _duckingMultiplier = 1.0f;
+    private bool _duckingEnabled;
+    private bool _duckOnSend = true;
+    private bool _duckOnReceive = true;
+    private int _activeRxCount; // number of frequencies currently receiving audio
+
     // ---- heartbeat / pong tracking ----
     private long _lastPongTicks = 0;
     private const int PongTimeoutSeconds = 30;
+
+    // ---- reconnect support ----
+    private bool _intentionalDisconnect;
+    private readonly HashSet<int> _activeFrequencies = new();
 
     // ---- connection info ----
     private string _host = "";
@@ -126,6 +145,49 @@ public sealed class VoiceService : IDisposable
     public void SetMasterOutputVolume(float volume) => _masterOutputVolume = Math.Clamp(volume, 0f, 1.25f);
 
     /// <summary>
+    /// Set the ducking level applied to received audio while transmitting.
+    /// 0 = full mute while TX, 100 = no ducking.
+    /// </summary>
+    public void SetDuckingLevel(int percent) => _duckingMultiplier = Math.Clamp(percent / 100f, 0f, 1f);
+
+    /// <summary>
+    /// Enable or disable voice ducking globally.
+    /// </summary>
+    public void SetDuckingEnabled(bool enabled) => _duckingEnabled = enabled;
+
+    /// <summary>
+    /// Enable or disable ducking while transmitting.
+    /// </summary>
+    public void SetDuckOnSend(bool enabled) => _duckOnSend = enabled;
+
+    /// <summary>
+    /// Enable or disable ducking while receiving voice.
+    /// </summary>
+    public void SetDuckOnReceive(bool enabled) => _duckOnReceive = enabled;
+
+    /// <summary>
+    /// Notify VoiceService that an RX stream started on some frequency.
+    /// Used for duck-on-receive of internal radio audio.
+    /// </summary>
+    public void NotifyRxStart() { Interlocked.Increment(ref _activeRxCount); }
+
+    /// <summary>
+    /// Notify VoiceService that an RX stream stopped on some frequency.
+    /// </summary>
+    public void NotifyRxStop() { var v = Interlocked.Decrement(ref _activeRxCount); if (v < 0) Interlocked.Exchange(ref _activeRxCount, 0); }
+
+    /// <summary>
+    /// Set per-frequency ducking level. -1 = use global default, 0-100 = custom.
+    /// </summary>
+    public void SetFreqDucking(int freqId, int duckingLevel)
+    {
+        float level = duckingLevel < 0 ? -1f : Math.Clamp(duckingLevel / 100f, 0f, 1f);
+        _freqSettings.AddOrUpdate(freqId,
+            _ => new FreqAudioSettings { DuckingLevel = level },
+            (_, s) => { s.DuckingLevel = level; return s; });
+    }
+
+    /// <summary>
     /// Set per-frequency audio settings (volume, pan, mute).
     /// </summary>
     public void SetFreqSettings(int freqId, float volume, float pan, bool muted)
@@ -137,9 +199,12 @@ public sealed class VoiceService : IDisposable
 
     /// <summary>
     /// Connect to the voice relay server.
+    /// Returns true when authenticated successfully, false otherwise.
     /// </summary>
-    public async Task ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
+    public async Task<bool> ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
     {
+        _intentionalDisconnect = false;
+
         // Validate host
         if (string.IsNullOrWhiteSpace(host))
             throw new ArgumentException("Voice host cannot be empty.", nameof(host));
@@ -187,7 +252,7 @@ public sealed class VoiceService : IDisposable
         {
             Error(ex);
             Status($"WebSocket connect failed: {ex.Message}");
-            return;
+            return false;
         }
 
         Status("WebSocket connected, sending auth...");
@@ -211,7 +276,10 @@ public sealed class VoiceService : IDisposable
         if (!IsConnected)
         {
             Status("Auth timeout – server did not respond");
+            return false;
         }
+
+        return true;
     }
 
     /// <summary>
@@ -222,6 +290,7 @@ public sealed class VoiceService : IDisposable
     {
         if (!IsConnected || _ws == null) return false;
 
+        _activeFrequencies.Add(freqId);
         var msg = new { type = "join", freqId };
         await WsSendAsync(msg, _cts!.Token);
 
@@ -237,6 +306,7 @@ public sealed class VoiceService : IDisposable
     {
         if (!IsConnected || _ws == null) return;
 
+        _activeFrequencies.Remove(freqId);
         var msg = new { type = "leave", freqId };
         await WsSendAsync(msg, _cts!.Token);
     }
@@ -363,6 +433,7 @@ public sealed class VoiceService : IDisposable
 
     public async Task DisconnectAsync()
     {
+        _intentionalDisconnect = true;
         _cts?.Cancel();
         _isTransmitting = false;
         IsConnected = false;
@@ -420,6 +491,8 @@ public sealed class VoiceService : IDisposable
                 {
                     IsConnected = false;
                     Status("Server closed connection");
+                    if (!_intentionalDisconnect)
+                        UnexpectedDisconnect?.Invoke();
                     break;
                 }
 
@@ -449,7 +522,10 @@ public sealed class VoiceService : IDisposable
         }
         finally
         {
+            bool wasConnected = IsConnected;
             IsConnected = false;
+            if (wasConnected && !_intentionalDisconnect)
+                UnexpectedDisconnect?.Invoke();
         }
     }
 
@@ -480,6 +556,7 @@ public sealed class VoiceService : IDisposable
 
                     IsConnected = true;
                     Status("Connected");
+                    Connected?.Invoke();
 
                     // Start heartbeat
                     _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts!.Token));
@@ -576,6 +653,28 @@ public sealed class VoiceService : IDisposable
         if (settings is { Muted: true }) return;
 
         float vol = (settings?.Volume ?? 1.0f) * _masterOutputVolume;
+
+        // Apply voice ducking
+        if (_duckingEnabled)
+        {
+            bool applyDuck = false;
+
+            // Duck-on-send: reduce RX volume while transmitting
+            if (_isTransmitting && _duckOnSend)
+                applyDuck = true;
+
+            // Duck-on-receive: reduce RX volume while any frequency is receiving audio from others
+            if (_duckOnReceive && _activeRxCount > 0)
+                applyDuck = true;
+
+            if (applyDuck)
+            {
+                // Use per-frequency ducking if set, otherwise fall back to global
+                float duckMul = (settings?.DuckingLevel >= 0f) ? settings.DuckingLevel : _duckingMultiplier;
+                vol *= duckMul;
+            }
+        }
+
         float pan = settings?.Pan ?? 0.5f;
 
         int opusLen = length - 8;
@@ -754,13 +853,11 @@ public sealed class VoiceService : IDisposable
                 var elapsed = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastPongTicks));
                 if (elapsed.TotalSeconds > PongTimeoutSeconds)
                 {
-                    Status("Heartbeat timeout — no pong received, reconnecting...");
-                    _ = Task.Run(async () =>
-                    {
-                        await DisconnectAsync();
-                        try { await ConnectAsync(_host, _wsPort, _discordUserId, _guildId, _authToken); }
-                        catch { }
-                    });
+                    Status("Heartbeat timeout — no pong received");
+                    IsConnected = false;
+                    CleanupConnection();
+                    if (!_intentionalDisconnect)
+                        UnexpectedDisconnect?.Invoke();
                     return;
                 }
 
@@ -777,6 +874,24 @@ public sealed class VoiceService : IDisposable
 
     private void Status(string msg) => StatusChanged?.Invoke(msg);
     private void Error(Exception ex) => ErrorOccurred?.Invoke(ex);
+
+    /// <summary>
+    /// Returns a snapshot of all frequencies that were joined before a disconnect.
+    /// Used by ReconnectManager to re-join after reconnection.
+    /// </summary>
+    public int[] GetActiveFrequencies() => _activeFrequencies.ToArray();
+
+    /// <summary>
+    /// Cleans up old WebSocket / audio resources without clearing
+    /// _activeFrequencies, so the ReconnectManager can re-join them.
+    /// </summary>
+    public void CleanupForReconnect()
+    {
+        _cts?.Cancel();
+        _isTransmitting = false;
+        IsConnected = false;
+        CleanupConnection();
+    }
 
     private void CleanupConnection()
     {

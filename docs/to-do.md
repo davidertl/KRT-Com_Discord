@@ -1,13 +1,17 @@
 # High priority:
-- reconnect logic: auto-reconnect voice WebSocket on disconnect without requiring PTT press
-- change the beep at the end of a push-to-talk session to a hissing noice like a walkie talkie.
-- voice ducking with a slider. 
-    - when the slider is at 100% the voice ducking is disabled and the received audio is played at full volume. 
-    - when the slider is at 0% the voice ducking is fully enabled and the received audio is completely muted while transmitting. 
-    - intermediate values would reduce the volume of the received audio proportionally while transmitting, allowing users to find a comfortable balance between hearing others and being heard themselves.
-    - please let the user choose which audio should be ducked (e.g. only discord, or all audio). This could be implemented by allowing users to select specific audio sources or applications in the companion app settings, and then applying the ducking effect only to those selected sources when transmitting on the radio.
+- [x] voice ducking with a slider. 
+    - [x] when the slider is at 100% the voice ducking is disabled and the received audio is played at full volume. 
+    - [x] when the slider is at 0% the voice ducking is fully enabled and the received audio is completely muted while transmitting. 
+    - [x] intermediate values would reduce the volume of the received audio proportionally while transmitting, allowing users to find a comfortable balance between hearing others and being heard themselves.
+    - [x] please let the user choose which audio should be ducked (e.g. only discord, or all audio). This could be implemented by allowing users to select specific audio sources or applications in the companion app settings, and then applying the ducking effect only to those selected sources when transmitting on the radio.
+    - [x] separate ducking card in App Settings with enable/disable toggle
+    - [x] per-radio ducking level override (checkbox + slider per radio panel)
+    - [x] checkboxes for "duck when sending" and "duck when receiving" (can select both)
+    - [x] duck-on-receive: external app ducking while someone is transmitting on your radio
+    - [x] ducking target options: Radio audio only / Selected apps / All audio except KRT-Com
+    - [x] debug logging for ducking events
 
--disable the possibility to transmit on a frequency that is muted except for broadcasts. 
+- [x] disable the possibility to transmit on a frequency that is muted except for broadcasts.
   
 # Medium priority: 
 - Derzeit werden Sprachdaten zwar über TLS zum Server gesendet, aber auf der Strecke zwischen Server und Clients über UDP ausgetauscht. Um ein wirklich verschlüsseltes Funksystem zu erreichen, sollte die Audio-Übertragung selbst Ende-zu-Ende oder zumindest Ende-zu-Server-zu-Ende verschlüsselt werden. Eine Erweiterung wäre, pro Funk-Frequenz einen verschlüsselten Sprachkanal einzurichten. Praktisch könnte das so aussehen: Beim Frequenzbeitritt erzeugt der Server oder die Clients einen zufälligen Session-Schlüssel (z.B. via sicheren Diffie-Hellman-Austausch oder vom Server generiert und über den TLS-gesicherten WebSocket verteilt). Alle Teilnehmer dieser Frequenz verwenden diesen Schlüssel, um die Opus-Audiopakete vor dem Versand zu verschlüsseln (und entsprechend nach Empfang zu entschlüsseln). Der Server würde die verschlüsselten Pakete lediglich weiterleiten, ohne sie selbst zu decodieren. So wären die Audioinhalte auch dann vertraulich, wenn jemand den UDP-Datenverkehr abhört. Diese zusätzliche Verschlüsselung könnte optional oder für bestimmte als sensibel markierte Frequenzen aktiviert werden. Im Projekt-Backlog ist bereits ein ähnliches Konzept vorgesehen (“Zusätzliche Verschlüsselung per Keyphrase”). Die Implementierung lässt sich mit begrenztem Aufwand ergänzen, da auf Client-Seite dank der bestehenden Concentus-Bibliothek bereits Byte-Buffer der Audiopakete vorliegen – diese könnten vor dem Senden mit z.B. AES-GCM symmetrisch verschlüsselt werden. Wichtig ist, einen Schlüsselaustausch-Mechanismus zu integrieren, der in die bestehende WebSocket-Kontrollverbindung passt (z.B. als Teil der Authentifizierung beim Frequenzbeitritt). Insgesamt würde diese Maßnahme die Vertraulichkeit der Sprachkommunikation erheblich stärken, ohne die grundlegende Architektur (WebSocket-Steuerkanal + UDP-Datenkanal) zu verändern.

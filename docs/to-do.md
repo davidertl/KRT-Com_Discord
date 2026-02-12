@@ -1,60 +1,12 @@
 # High priority:
-- [x] voice ducking with a slider. 
-    - [x] when the slider is at 100% the voice ducking is disabled and the received audio is played at full volume. 
-    - [x] when the slider is at 0% the voice ducking is fully enabled and the received audio is completely muted while transmitting. 
-    - [x] intermediate values would reduce the volume of the received audio proportionally while transmitting, allowing users to find a comfortable balance between hearing others and being heard themselves.
-    - [x] please let the user choose which audio should be ducked (e.g. only discord, or all audio). This could be implemented by allowing users to select specific audio sources or applications in the companion app settings, and then applying the ducking effect only to those selected sources when transmitting on the radio.
-    - [x] separate ducking card in App Settings with enable/disable toggle
-    - [x] per-radio ducking level override (checkbox + slider per radio panel)
-    - [x] checkboxes for "duck when sending" and "duck when receiving" (can select both)
-    - [x] duck-on-receive: external app ducking while someone is transmitting on your radio
-    - [x] ducking target options: Radio audio only / Selected apps / All audio except KRT-Com
-    - [x] debug logging for ducking events
 
-- [x] disable the possibility to transmit on a frequency that is muted except for broadcasts.
   
 # Medium priority: 
 - Derzeit werden Sprachdaten zwar über TLS zum Server gesendet, aber auf der Strecke zwischen Server und Clients über UDP ausgetauscht. Um ein wirklich verschlüsseltes Funksystem zu erreichen, sollte die Audio-Übertragung selbst Ende-zu-Ende oder zumindest Ende-zu-Server-zu-Ende verschlüsselt werden. Eine Erweiterung wäre, pro Funk-Frequenz einen verschlüsselten Sprachkanal einzurichten. Praktisch könnte das so aussehen: Beim Frequenzbeitritt erzeugt der Server oder die Clients einen zufälligen Session-Schlüssel (z.B. via sicheren Diffie-Hellman-Austausch oder vom Server generiert und über den TLS-gesicherten WebSocket verteilt). Alle Teilnehmer dieser Frequenz verwenden diesen Schlüssel, um die Opus-Audiopakete vor dem Versand zu verschlüsseln (und entsprechend nach Empfang zu entschlüsseln). Der Server würde die verschlüsselten Pakete lediglich weiterleiten, ohne sie selbst zu decodieren. So wären die Audioinhalte auch dann vertraulich, wenn jemand den UDP-Datenverkehr abhört. Diese zusätzliche Verschlüsselung könnte optional oder für bestimmte als sensibel markierte Frequenzen aktiviert werden. Im Projekt-Backlog ist bereits ein ähnliches Konzept vorgesehen (“Zusätzliche Verschlüsselung per Keyphrase”). Die Implementierung lässt sich mit begrenztem Aufwand ergänzen, da auf Client-Seite dank der bestehenden Concentus-Bibliothek bereits Byte-Buffer der Audiopakete vorliegen – diese könnten vor dem Senden mit z.B. AES-GCM symmetrisch verschlüsselt werden. Wichtig ist, einen Schlüsselaustausch-Mechanismus zu integrieren, der in die bestehende WebSocket-Kontrollverbindung passt (z.B. als Teil der Authentifizierung beim Frequenzbeitritt). Insgesamt würde diese Maßnahme die Vertraulichkeit der Sprachkommunikation erheblich stärken, ohne die grundlegende Architektur (WebSocket-Steuerkanal + UDP-Datenkanal) zu verändern.
 # Low priority:
--ingame overlay wer zuletzt auf welcher Frequenz gefunkt hat. 
-    - [x] essentiell mit on/off toggle im "App Settings" Tab
-    - [x] zuerst noch planen was alles nötig ist für Overlay
-    - [x] optional mit Rang (kann erst später implementiert werden, wenn ich weiß wie das Kartell die Daten angelegt hat)
-    - [x] overlay window: topmost, transparent, click-through WPF window
-    - [x] only show active radios (TX/RX or recent transmission)
-    - [x] sort radios by last active
-    - [x] recent transmission displayed prominently on the right side
-    - [x] background opacity setting (text stays fully readable)
-    - [x] auto-hide inactive radios after configurable timeout (default 60s)
 
-- [x] companion app: Tab "App Settings:
-    please change the order of the settings to this:
-    In "General"
-    -Play sound on PTT start/end
-      -enable sound on receiving
-      -enable sound on transmitting
-      -enable sound on beginning
-      -enable sound on end
-    - Enable Emergency Radio 
-      -Turn on Emergency radio on startup
-    In "Autostart"
-    - Launch on Windows start
-      - launch minimized on tray
-    - Autoconnect on launch
-    - recover active state from radios (otherwise radios will always start with the active state set to false)
-    In "Debugg"
-    - enable debug logging and the location of the log file
-  -rearange the two cards horizontally.
-
-- [x] companion app: when restarting i am do properly reconnect, but authentication shows me "login with discord" instead of log out button and the username that i am logged in with. this should only apply when the session token is actually valid and the user is authenticated.
 
 - [x] companion app:when receiving broadcasts, you hear the audio only on the pan and vol settings of the first radio that is receiving the broadcast, even if multiple radios are receiving the same broadcast. This should be fixed so that the pan is avaraged between the radios and vol settings are taken the highest of the receiving radios, so that if one radio is set to 100% and another to 50% the resulting volume is 100% and not 75%.
-
-- [x] companion app: remove the testPTT button from the companion app. 
-
-- [x] companion app on Tab Server: add a disconnect button to disconnect the voice connection next to the connected status.
-
-- [x] companion app on Tab Radio: when changing frequency the radio should automatically connect if the radio is active, so that the user doesnt have to send on the frequency to register. 
 
 # Wunschliste:
 -speech priority by user rank
@@ -77,10 +29,9 @@ check security autit notes and check which ones are already fixed, for the one t
 Security Audit Notes (as of 2025-02-17, updated 2026-02-09):
 Security:
 
-  - ~~Session tokens stored unhashed in SQLite voice_sessions table.~~ **FIXED**: Session tokens are SHA-256 hashed before storage in the `voice_sessions` table. Discord user IDs are HMAC-SHA256 hashed in all tables.
   
 
-# To-Do / Changelog
+# Changelog
 
 ## Fixed (Alpha 0.0.4 patch)
 

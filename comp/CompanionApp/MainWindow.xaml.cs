@@ -253,17 +253,6 @@ public partial class MainWindow : Window
         Keyboard.ClearFocus();
     }
 
-    // Test PTT button handling
-    private async void TestPtt_MouseDown(object sender, MouseButtonEventArgs e)
-    {
-        await _vm.StartTestAsync();
-    }
-
-    private async void TestPtt_MouseUp(object sender, MouseButtonEventArgs e)
-    {
-        await _vm.StopTestAsync();
-    }
-
     // Clear global hotkey handlers
     private void ClearTalkToAllHotkey_Click(object sender, RoutedEventArgs e)
     {

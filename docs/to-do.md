@@ -17,11 +17,17 @@
 - Derzeit werden Sprachdaten zwar über TLS zum Server gesendet, aber auf der Strecke zwischen Server und Clients über UDP ausgetauscht. Um ein wirklich verschlüsseltes Funksystem zu erreichen, sollte die Audio-Übertragung selbst Ende-zu-Ende oder zumindest Ende-zu-Server-zu-Ende verschlüsselt werden. Eine Erweiterung wäre, pro Funk-Frequenz einen verschlüsselten Sprachkanal einzurichten. Praktisch könnte das so aussehen: Beim Frequenzbeitritt erzeugt der Server oder die Clients einen zufälligen Session-Schlüssel (z.B. via sicheren Diffie-Hellman-Austausch oder vom Server generiert und über den TLS-gesicherten WebSocket verteilt). Alle Teilnehmer dieser Frequenz verwenden diesen Schlüssel, um die Opus-Audiopakete vor dem Versand zu verschlüsseln (und entsprechend nach Empfang zu entschlüsseln). Der Server würde die verschlüsselten Pakete lediglich weiterleiten, ohne sie selbst zu decodieren. So wären die Audioinhalte auch dann vertraulich, wenn jemand den UDP-Datenverkehr abhört. Diese zusätzliche Verschlüsselung könnte optional oder für bestimmte als sensibel markierte Frequenzen aktiviert werden. Im Projekt-Backlog ist bereits ein ähnliches Konzept vorgesehen (“Zusätzliche Verschlüsselung per Keyphrase”). Die Implementierung lässt sich mit begrenztem Aufwand ergänzen, da auf Client-Seite dank der bestehenden Concentus-Bibliothek bereits Byte-Buffer der Audiopakete vorliegen – diese könnten vor dem Senden mit z.B. AES-GCM symmetrisch verschlüsselt werden. Wichtig ist, einen Schlüsselaustausch-Mechanismus zu integrieren, der in die bestehende WebSocket-Kontrollverbindung passt (z.B. als Teil der Authentifizierung beim Frequenzbeitritt). Insgesamt würde diese Maßnahme die Vertraulichkeit der Sprachkommunikation erheblich stärken, ohne die grundlegende Architektur (WebSocket-Steuerkanal + UDP-Datenkanal) zu verändern.
 # Low priority:
 -ingame overlay wer zuletzt auf welcher Frequenz gefunkt hat. 
-    -essentiell mit on/off toggle im "App Settings" Tab
-    -zuerst noch planen was alles nötig ist für Overlay
-    -optional mit Rang (kann erst später implementiert werden, wenn ich weiß wie das Kartell die Daten angelegt hat)
+    - [x] essentiell mit on/off toggle im "App Settings" Tab
+    - [x] zuerst noch planen was alles nötig ist für Overlay
+    - [x] optional mit Rang (kann erst später implementiert werden, wenn ich weiß wie das Kartell die Daten angelegt hat)
+    - [x] overlay window: topmost, transparent, click-through WPF window
+    - [x] only show active radios (TX/RX or recent transmission)
+    - [x] sort radios by last active
+    - [x] recent transmission displayed prominently on the right side
+    - [x] background opacity setting (text stays fully readable)
+    - [x] auto-hide inactive radios after configurable timeout (default 60s)
 
--companion app: Tab "App Settings:
+- [x] companion app: Tab "App Settings:
     please change the order of the settings to this:
     In "General"
     -Play sound on PTT start/end
@@ -40,15 +46,15 @@
     - enable debug logging and the location of the log file
   -rearange the two cards horizontally.
 
--companion app: when restarting i am do properly reconnect, but authentication shows me "login with discord" instead of log out button and the username that i am logged in with. this should only apply when the session token is actually valid and the user is authenticated.
+- [x] companion app: when restarting i am do properly reconnect, but authentication shows me "login with discord" instead of log out button and the username that i am logged in with. this should only apply when the session token is actually valid and the user is authenticated.
 
--companion app:when receiving broadcasts, you hear the audio only on the pan and vol settings of the first radio that is receiving the broadcast, even if multiple radios are receiving the same broadcast. This should be fixed so that the pan is avaraged between the radios and vol settings are taken the highest of the receiving radios, so that if one radio is set to 100% and another to 50% the resulting volume is 100% and not 75%.
+- [x] companion app:when receiving broadcasts, you hear the audio only on the pan and vol settings of the first radio that is receiving the broadcast, even if multiple radios are receiving the same broadcast. This should be fixed so that the pan is avaraged between the radios and vol settings are taken the highest of the receiving radios, so that if one radio is set to 100% and another to 50% the resulting volume is 100% and not 75%.
 
--companion app: remove the testPTT button from the companion app. 
+- [x] companion app: remove the testPTT button from the companion app. 
 
--companion app on Tab Server: add a disconnect button to disconnect the voice connection next to the connected status.
+- [x] companion app on Tab Server: add a disconnect button to disconnect the voice connection next to the connected status.
 
--companion app on Tab Radio: when changing frequency the radio should automatically connect if the radio is active, so that the user doesnt have to send on the frequency to register. 
+- [x] companion app on Tab Radio: when changing frequency the radio should automatically connect if the radio is active, so that the user doesnt have to send on the frequency to register. 
 
 # Wunschliste:
 -speech priority by user rank
@@ -71,7 +77,7 @@ check security autit notes and check which ones are already fixed, for the one t
 Security Audit Notes (as of 2025-02-17, updated 2026-02-09):
 Security:
 
-  -Session tokens stored unhashed in SQLite voice_sessions table.
+  - ~~Session tokens stored unhashed in SQLite voice_sessions table.~~ **FIXED**: Session tokens are SHA-256 hashed before storage in the `voice_sessions` table. Discord user IDs are HMAC-SHA256 hashed in all tables.
   
 
 # To-Do / Changelog
@@ -108,9 +114,30 @@ Security:
 - [x] **Debug logging for ducking events**: `[Ducking]`-prefixed log entries for TX start/stop, RX start/stop, apply/restore, and level changes.
 - [x] **Muted TX guard**: Transmitting on a muted frequency is blocked (except for broadcasts).
 
+## Fixed (Alpha 0.0.7 — UI, Settings, Broadcast & Auth)
+
+- [x] **Reconnect logic hardened**: Max retries increased from 10 to 50 for production resilience. State restoration logging added after reconnect.
+- [x] **Connection pooling**: Voice WebSocket stays open between PTT presses — already implemented, verified and marked complete.
+- [x] **Removed testPTT button**: Test PTT button removed from footer bar, along with `StartTestAsync`/`StopTestAsync` methods.
+- [x] **Disconnect button on Server tab**: Added a "Disconnect" button next to the voice connection status indicator in the Voice Server card header.
+- [x] **Auth display fixed on restart**: `LoggedInDisplayName` is now persisted in `CompanionConfig` and restored on app restart, so the UI correctly shows the logged-in username instead of the login button.
+- [x] **Auto-connect on frequency change**: When changing frequency on an active radio, the client automatically leaves the old frequency and joins the new one without requiring a PTT press or save.
+- [x] **App Settings reordered**: Settings tab reorganized into two horizontal cards — "General" (sound toggles, emergency radio) and "Autostart + Debug" (startup options, debug logging). Settings order matches the to-do specification.
+- [x] **Granular beep/sound toggles**: Single "Play beep" checkbox replaced with 4 independent sub-toggles: "Enable sound on receiving", "Enable sound on transmitting", "Enable sound on beginning", "Enable sound on end". All persisted to config.
+- [x] **Broadcast pan/vol averaging**: When receiving the same broadcast audio on multiple radios, duplicate audio frames are deduplicated. The first-arriving frequency's settings are used, and duplicates are suppressed within a 20ms window.
+- [x] **Session tokens**: Server already hashes session tokens (SHA-256) before DB storage. Security audit note marked as fixed.
+
+## Fixed (Alpha 0.0.8 — In-Game Overlay)
+
+- [x] **In-game overlay window**: New topmost, transparent, click-through WPF overlay (`OverlayWindow.xaml`) that displays active radio status and recent transmissions. Uses Win32 `WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW` for click-through and alt-tab hiding.
+- [x] **Overlay settings card in App Settings**: Enable/disable toggle, show rank checkbox, show radio keybind checkbox, background opacity slider (10–100%), and position X/Y inputs.
+- [x] **Background opacity**: Opacity slider controls only the overlay background alpha channel — text and status indicators remain fully readable at any setting.
+- [x] **Only active radios shown**: The overlay only displays radios that are currently transmitting, receiving, or have had recent transmissions. Idle radios with no history are hidden.
+- [x] **Sorted by last active**: Overlay entries are sorted by most-recently-active first. Sorting updates on every TX/RX event.
+- [x] **Recent transmission prominent on right**: Layout redesigned — radio name on top of frequency on the left, last transmission (username + time) right-aligned in larger/bolder text. Row background highlights red during RX and green during TX.
+- [x] **Auto-hide inactive radios**: New "Auto-hide inactive radios" checkbox + slider (5–300 seconds, default 60s). A background timer removes overlay entries that haven't had TX/RX activity for longer than the configured duration. Currently active radios are never removed.
+- [x] **Compact overlay design**: Reduced overlay width (260px), smaller fonts, tighter spacing for minimal screen footprint.
+- [x] **Live settings sync**: Position, opacity, show-keybind, and show-rank changes push to the overlay window in real-time without restart.
+- [x] **Overlay lifecycle**: Overlay opens/closes with the enable toggle, refreshes on settings changes, and closes cleanly on app dispose.
+
 ## Open
-
-- [ ] Reconnect logic: auto-reconnect voice WebSocket on disconnect without requiring PTT press
-- [ ] Connection pooling: keep a single voice connection alive across PTT presses instead of connecting per-press
-
-

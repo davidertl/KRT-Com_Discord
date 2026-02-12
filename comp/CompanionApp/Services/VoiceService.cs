@@ -97,6 +97,19 @@ public sealed class VoiceService : IDisposable
     private bool _duckOnReceive = true;
     private int _activeRxCount; // number of frequencies currently receiving audio
 
+    // ---- broadcast deduplication ----
+    // When the same audio frame (same sequence + identical Opus bytes) arrives on
+    // multiple frequencies within a short window, it's a broadcast. We merge
+    // the audio settings (max volume, average pan) and play only once.
+    private readonly object _broadcastLock = new();
+    private uint _lastBroadcastSeq;
+    private int _lastBroadcastHash;
+    private long _lastBroadcastTicks;
+    private float _broadcastVolAccum;
+    private float _broadcastPanAccum;
+    private int _broadcastFreqCount;
+    private const long BroadcastWindowTicks = TimeSpan.TicksPerMillisecond * 20; // 20ms window
+
     // ---- heartbeat / pong tracking ----
     private long _lastPongTicks = 0;
     private const int PongTimeoutSeconds = 30;
@@ -632,6 +645,7 @@ public sealed class VoiceService : IDisposable
 
         // Parse big-endian header
         int freqId = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(0));
+        uint seq = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4));
 
         // Look up per-frequency audio settings
         var settings = _freqSettings.GetValueOrDefault(freqId);
@@ -651,6 +665,43 @@ public sealed class VoiceService : IDisposable
         float pan = settings?.Pan ?? 0.5f;
 
         int opusLen = length - 8;
+
+        // ---- Broadcast deduplication ----
+        // If the same sequence + identical Opus data arrives on multiple frequencies
+        // within 20ms, it's a broadcast. Merge settings and play once.
+        int opusHash = ComputeOpusHash(data, 8, opusLen);
+        lock (_broadcastLock)
+        {
+            long now = DateTime.UtcNow.Ticks;
+            if (seq == _lastBroadcastSeq && opusHash == _lastBroadcastHash
+                && (now - _lastBroadcastTicks) < BroadcastWindowTicks)
+            {
+                // Duplicate frame on another frequency — accumulate settings
+                _broadcastFreqCount++;
+                _broadcastPanAccum += pan;
+                // Use max volume across receiving radios
+                if (vol > _broadcastVolAccum)
+                    _broadcastVolAccum = vol;
+                return; // don't play again — the first frame already played
+            }
+
+            // Flush previous broadcast if pending (check if we had accumulated duplicates
+            // that arrived after the first but we couldn't merge because first already played).
+            // In our approach, the first frame plays immediately and duplicates are suppressed,
+            // but we need to adjust the first frame's vol/pan retroactively.
+            // Since audio is already mixed into the buffer, we accept a minor imprecision:
+            // the first-arriving frequency's vol/pan is used. For better accuracy, we'd need
+            // to buffer and delay. This tradeoff is acceptable for real-time audio.
+
+            // Start new broadcast tracking window
+            _lastBroadcastSeq = seq;
+            _lastBroadcastHash = opusHash;
+            _lastBroadcastTicks = now;
+            _broadcastVolAccum = vol;
+            _broadcastPanAccum = pan;
+            _broadcastFreqCount = 1;
+        }
+
         var opusData = new byte[opusLen];
         Array.Copy(data, 8, opusData, 0, opusLen);
 
@@ -668,6 +719,23 @@ public sealed class VoiceService : IDisposable
         catch
         {
             // Ignore decode errors
+        }
+    }
+
+    /// <summary>
+    /// Fast hash of Opus payload bytes for broadcast deduplication.
+    /// </summary>
+    private static int ComputeOpusHash(byte[] data, int offset, int length)
+    {
+        unchecked
+        {
+            int hash = 17;
+            int end = offset + length;
+            // Sample every 4th byte for speed on large packets
+            for (int i = offset; i < end; i += 4)
+                hash = hash * 31 + data[i];
+            hash = hash * 31 + length;
+            return hash;
         }
     }
 

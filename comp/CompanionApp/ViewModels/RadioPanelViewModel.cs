@@ -59,6 +59,12 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     private string _label = "Radio";
     private string _freqInput = "";
     private int _freqId = 1000;
+    private int _previousFreqId = 1000;
+
+    /// <summary>
+    /// The frequency ID that was set before the current one. Used to leave the old frequency on change.
+    /// </summary>
+    public int PreviousFreqId => _previousFreqId;
     private string _hotkey = "";
     private string _channelName = "";
     private int _volume = 100;
@@ -133,6 +139,8 @@ public class RadioPanelViewModel : INotifyPropertyChanged
         get => _freqId;
         set 
         { 
+            if (_freqId == Math.Clamp(value, 1000, 9999)) return;
+            _previousFreqId = _freqId;
             _freqId = Math.Clamp(value, 1000, 9999);
             _freqInput = _freqId.ToString();
             OnPropertyChanged(); 

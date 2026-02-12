@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.6
+##version alpha-0.0.8
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.6"
+VERSION="Alpha 0.0.8"
 echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------

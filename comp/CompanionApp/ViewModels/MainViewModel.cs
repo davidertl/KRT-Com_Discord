@@ -18,7 +18,7 @@ namespace CompanionApp.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
-    public const string AppVersion = "Alpha 0.0.6";
+    public const string AppVersion = "Alpha 0.0.8";
 
     private CompanionConfig _config = new();
     private HotkeyHook? _hook;
@@ -31,6 +31,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _streamCts;
     private RadioPanelViewModel? _activeRadio;
     private HashSet<RadioPanelViewModel> _activeBroadcastRadios = new();
+    private OverlayWindow? _overlayWindow;
 
     // Radio Panels (8 total, 4 visible in basic mode)
     public ObservableCollection<RadioPanelViewModel> RadioPanels { get; } = new();
@@ -339,6 +340,34 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private bool _playSoundOnTransmit = true;
+    public bool PlaySoundOnTransmit
+    {
+        get => _playSoundOnTransmit;
+        set { _playSoundOnTransmit = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _playSoundOnReceive = true;
+    public bool PlaySoundOnReceive
+    {
+        get => _playSoundOnReceive;
+        set { _playSoundOnReceive = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _playSoundOnBegin = true;
+    public bool PlaySoundOnBegin
+    {
+        get => _playSoundOnBegin;
+        set { _playSoundOnBegin = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private bool _playSoundOnEnd = true;
+    public bool PlaySoundOnEnd
+    {
+        get => _playSoundOnEnd;
+        set { _playSoundOnEnd = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
     private bool _autoConnect = true;
     public bool AutoConnect
     {
@@ -375,6 +404,75 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _ = HandleEmergencyRadioToggleAsync();
         }
     }
+
+    // ---- Overlay settings ----
+    private bool _overlayEnabled;
+    public bool OverlayEnabled
+    {
+        get => _overlayEnabled;
+        set
+        {
+            _overlayEnabled = value;
+            OnPropertyChanged();
+            MarkGlobalChanged();
+            if (_overlayEnabled) ShowOverlay(); else HideOverlay();
+        }
+    }
+
+    private bool _overlayShowRank;
+    public bool OverlayShowRank
+    {
+        get => _overlayShowRank;
+        set { _overlayShowRank = value; OnPropertyChanged(); MarkGlobalChanged(); RefreshOverlay(); }
+    }
+
+    private bool _overlayShowRadioKeybind;
+    public bool OverlayShowRadioKeybind
+    {
+        get => _overlayShowRadioKeybind;
+        set { _overlayShowRadioKeybind = value; OnPropertyChanged(); MarkGlobalChanged(); RefreshOverlay(); }
+    }
+
+    private int _overlayPositionX = 20;
+    public int OverlayPositionX
+    {
+        get => _overlayPositionX;
+        set { _overlayPositionX = value; OnPropertyChanged(); MarkGlobalChanged(); _overlayWindow?.SetPosition(_overlayPositionX, _overlayPositionY); }
+    }
+
+    private int _overlayPositionY = 20;
+    public int OverlayPositionY
+    {
+        get => _overlayPositionY;
+        set { _overlayPositionY = value; OnPropertyChanged(); MarkGlobalChanged(); _overlayWindow?.SetPosition(_overlayPositionX, _overlayPositionY); }
+    }
+
+    private int _overlayOpacity = 80;
+    public int OverlayOpacity
+    {
+        get => _overlayOpacity;
+        set { _overlayOpacity = Math.Clamp(value, 10, 100); OnPropertyChanged(); OnPropertyChanged(nameof(OverlayOpacityText)); MarkGlobalChanged(); _overlayWindow?.SetBackgroundOpacity(_overlayOpacity / 100.0); }
+    }
+
+    public string OverlayOpacityText => $"{OverlayOpacity}%";
+
+    private bool _overlayAutoHideEnabled = true;
+    public bool OverlayAutoHideEnabled
+    {
+        get => _overlayAutoHideEnabled;
+        set { _overlayAutoHideEnabled = value; OnPropertyChanged(); MarkGlobalChanged(); }
+    }
+
+    private int _overlayAutoHideSeconds = 60;
+    public int OverlayAutoHideSeconds
+    {
+        get => _overlayAutoHideSeconds;
+        set { _overlayAutoHideSeconds = Math.Clamp(value, 5, 600); OnPropertyChanged(); OnPropertyChanged(nameof(OverlayAutoHideText)); MarkGlobalChanged(); }
+    }
+
+    public string OverlayAutoHideText => $"{OverlayAutoHideSeconds}s";
+
+    private System.Windows.Threading.DispatcherTimer? _overlayCleanupTimer;
 
     private bool _debugLoggingEnabled;
     public bool DebugLoggingEnabled
@@ -1055,23 +1153,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         return $"{scheme}://{cleanHost}:{VoicePort}";
     }
 
-    public async Task StartTestAsync()
-    {
-        var radio = RadioPanels.FirstOrDefault(r => r.IsEnabled);
-        if (radio == null)
-        {
-            StatusText = "No enabled radio";
-            return;
-        }
-
-        await HandlePttPressedAsync(radio);
-    }
-
-    public async Task StopTestAsync()
-    {
-        await HandlePttReleasedAsync();
-    }
-
     /// <summary>
     /// Start broadcasting to all radios that have IncludedInBroadcast set.
     /// Used for TalkToAll hotkey.
@@ -1153,7 +1234,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 LogDebug($"[Ducking] External duck-on-send (broadcast) applied: level={_duckingLevel}% mode={_duckingMode}");
             }
 
-            _beepService?.PlayTalkToAllBeep(
+            if (PlaySoundOnTransmit && PlaySoundOnBegin)
+                _beepService?.PlayTalkToAllBeep(
                 broadcastRadios.Max(r => r.Volume) / 100f,
                 (float)broadcastRadios.Average(r => r.Balance) / 100f);
         }
@@ -1201,7 +1283,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         IsBroadcasting = false;
         IsStreaming = false;
-        _beepService?.PlayTxEndBeep(bcastVol, bcastPan);
+        if (PlaySoundOnTransmit && PlaySoundOnEnd)
+            _beepService?.PlayTxEndBeep(bcastVol, bcastPan);
         StatusText = "Broadcast stopped";
 
         await Task.CompletedTask;
@@ -1301,6 +1384,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         VoicePort = config.VoicePort;
 
         AuthToken = config.AuthToken;
+        LoggedInDisplayName = config.LoggedInDisplayName;
         _acceptedPolicyVersion = config.AcceptedPolicyVersion;
 
         AutoConnect = config.AutoConnect;
@@ -1310,7 +1394,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         SaveRadioActiveState = config.SaveRadioActiveState;
         TurnOnEmergencyOnStartup = config.TurnOnEmergencyOnStartup;
         EnableEmergencyRadio = config.EnableEmergencyRadio;
+        OverlayShowRank = config.OverlayShowRank;
+        OverlayShowRadioKeybind = config.OverlayShowRadioKeybind;
+        _overlayPositionX = config.OverlayPositionX;
+        OnPropertyChanged(nameof(OverlayPositionX));
+        _overlayPositionY = config.OverlayPositionY;
+        OnPropertyChanged(nameof(OverlayPositionY));
+        _overlayOpacity = Math.Clamp(config.OverlayOpacity, 10, 100);
+        OnPropertyChanged(nameof(OverlayOpacity));
+        OnPropertyChanged(nameof(OverlayOpacityText));
+        OverlayAutoHideEnabled = config.OverlayAutoHideEnabled;
+        OverlayAutoHideSeconds = config.OverlayAutoHideSeconds;
+        // Open overlay last so position/opacity are already set
+        OverlayEnabled = config.OverlayEnabled;
         DebugLoggingEnabled = config.DebugLoggingEnabled;
+        PlaySoundOnTransmit = config.PlaySoundOnTransmit;
+        PlaySoundOnReceive = config.PlaySoundOnReceive;
+        PlaySoundOnBegin = config.PlaySoundOnBegin;
+        PlaySoundOnEnd = config.PlaySoundOnEnd;
+        // Keep PlayPttBeep in sync: enabled if any sound toggle is on
+        PlayPttBeep = config.PlaySoundOnTransmit || config.PlaySoundOnReceive || config.PlaySoundOnBegin || config.PlaySoundOnEnd;
         InputVolume = config.InputVolume;
         OutputVolume = config.OutputVolume;
         DuckingEnabled = config.DuckingEnabled;
@@ -1439,6 +1542,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.VoicePort = VoicePort;
 
         _config.AuthToken = AuthToken;
+        _config.LoggedInDisplayName = LoggedInDisplayName;
         _config.AcceptedPolicyVersion = _acceptedPolicyVersion;
 
         _config.AutoConnect = AutoConnect;
@@ -1447,7 +1551,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _config.SaveRadioActiveState = SaveRadioActiveState;
         _config.TurnOnEmergencyOnStartup = TurnOnEmergencyOnStartup;
         _config.EnableEmergencyRadio = EnableEmergencyRadio;
+        _config.OverlayEnabled = OverlayEnabled;
+        _config.OverlayShowRank = OverlayShowRank;
+        _config.OverlayShowRadioKeybind = OverlayShowRadioKeybind;
+        _config.OverlayPositionX = OverlayPositionX;
+        _config.OverlayPositionY = OverlayPositionY;
+        _config.OverlayOpacity = OverlayOpacity;
+        _config.OverlayAutoHideEnabled = OverlayAutoHideEnabled;
+        _config.OverlayAutoHideSeconds = OverlayAutoHideSeconds;
         _config.DebugLoggingEnabled = DebugLoggingEnabled;
+        _config.PlaySoundOnTransmit = PlaySoundOnTransmit;
+        _config.PlaySoundOnReceive = PlaySoundOnReceive;
+        _config.PlaySoundOnBegin = PlaySoundOnBegin;
+        _config.PlaySoundOnEnd = PlaySoundOnEnd;
         _config.InputVolume = InputVolume;
         _config.OutputVolume = OutputVolume;
         _config.DuckingEnabled = DuckingEnabled;
@@ -1657,6 +1773,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             _activeRadio = radio;
             radio.SetTransmitting(true);
+            UpdateOverlayTransmitState(radio.FreqId, true);
             StatusText = $"PTT start ({radio.Label} - Freq {radio.FreqId})";
 
             _backend?.Dispose();
@@ -1718,9 +1835,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 // Continue - audio capture still works
             }
             if (radio.IsEmergencyRadio)
-                _beepService?.PlayEmergencyTxBeep(radio.Volume / 100f, radio.Balance / 100f);
+            {
+                if (PlaySoundOnTransmit && PlaySoundOnBegin)
+                    _beepService?.PlayEmergencyTxBeep(radio.Volume / 100f, radio.Balance / 100f);
+            }
             else
-                _beepService?.PlayTxStartBeep(radio.Volume / 100f, radio.Balance / 100f);
+            {
+                if (PlaySoundOnTransmit && PlaySoundOnBegin)
+                    _beepService?.PlayTxStartBeep(radio.Volume / 100f, radio.Balance / 100f);
+            }
         }
         catch (Exception ex)
         {
@@ -1744,6 +1867,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (radio != null)
         {
             radio.SetTransmitting(false);
+            UpdateOverlayTransmitState(radio.FreqId, false);
         }
 
         try
@@ -1774,14 +1898,22 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (radio != null)
         {
             var userName = string.IsNullOrWhiteSpace(LoggedInDisplayName) ? "You" : LoggedInDisplayName;
-            radio.AddTransmission($"{DateTime.Now:HH:mm} - {userName}");
+            var txTimestamp = $"{DateTime.Now:HH:mm} - {userName}";
+            radio.AddTransmission(txTimestamp);
+            UpdateOverlayForFreq(radio.FreqId, false, txTimestamp);
         }
 
         IsStreaming = false;
         if (radio?.IsEmergencyRadio == true)
-            _beepService?.PlayEmergencyTxEndBeep(radio.Volume / 100f, radio.Balance / 100f);
+        {
+            if (PlaySoundOnTransmit && PlaySoundOnEnd)
+                _beepService?.PlayEmergencyTxEndBeep(radio.Volume / 100f, radio.Balance / 100f);
+        }
         else
-            _beepService?.PlayTxEndBeep(radio?.Volume / 100f ?? 1f, radio?.Balance / 100f ?? 0.5f);
+        {
+            if (PlaySoundOnTransmit && PlaySoundOnEnd)
+                _beepService?.PlayTxEndBeep(radio?.Volume / 100f ?? 1f, radio?.Balance / 100f ?? 0.5f);
+        }
         StatusText = "PTT stop";
     }
 
@@ -1926,6 +2058,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             PushAllRadioSettingsToVoice();
             await PushAllServerMutesAsync();
 
+            LogDebug("[Voice] Reconnect state restoration complete: frequencies re-joined, mutes pushed, audio devices set");
             StatusText = "Reconnected successfully";
         });
     }
@@ -2009,6 +2142,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 matchingRadio.AddTransmission(timestamp);
                 matchingRadio.SetReceiving(true);
 
+                // Update overlay
+                UpdateOverlayForFreq(freqId, true, timestamp);
+
                 // Notify VoiceService so internal duck-on-receive works
                 _voice?.NotifyRxStart();
 
@@ -2022,14 +2158,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 LogDebug($"[Ducking] RX start on freq {freqId}: rxCount={_activeRxCount} enabled={DuckingEnabled} onRecv={_duckOnReceive} mode={_duckingMode}");
 
                 // Play appropriate RX beep
-                if (matchingRadio.IsEmergencyRadio)
-                    _beepService?.PlayEmergencyRxBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
-                else
-                    _beepService?.PlayRxStartBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
+                if (PlaySoundOnReceive && PlaySoundOnBegin)
+                {
+                    if (matchingRadio.IsEmergencyRadio)
+                        _beepService?.PlayEmergencyRxBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
+                    else
+                        _beepService?.PlayRxStartBeep(matchingRadio.Volume / 100f, matchingRadio.Balance / 100f);
+                }
             }
             else if (action == "stop")
             {
                 matchingRadio.SetReceiving(false);
+
+                // Update overlay
+                UpdateOverlayForFreq(freqId, false);
 
                 // Notify VoiceService so internal duck-on-receive stops
                 _voice?.NotifyRxStop();
@@ -2091,6 +2233,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 _ = HandleRadioEnabledChangedAsync(panel);
             }
         }
+
+        // Auto-connect on frequency change when radio is active
+        if (e.PropertyName is "FreqId")
+        {
+            _ = HandleFreqIdChangedAsync(panel);
+        }
+    }
+
+    private async Task HandleFreqIdChangedAsync(RadioPanelViewModel panel)
+    {
+        if (_voice == null || !_voice.IsConnected) return;
+        if (!panel.IsEnabled) return;
+        if (panel.IsEmergencyRadio && !EnableEmergencyRadio) return;
+
+        int oldFreq = panel.PreviousFreqId;
+        int newFreq = panel.FreqId;
+
+        if (oldFreq == newFreq) return;
+
+        // Leave old frequency
+        await _voice.LeaveFrequencyAsync(oldFreq);
+        LogDebug($"[Voice] Freq changed: left {oldFreq}");
+
+        // Join new frequency
+        await _voice.JoinFrequencyAsync(newFreq);
+        LogDebug($"[Voice] Freq changed: joined {newFreq}");
+
+        // Update audio settings for new frequency
+        PushRadioSettingsToVoice(panel);
+        await PushServerMuteAsync(panel);
     }
 
     private async Task HandleRadioEnabledChangedAsync(RadioPanelViewModel panel)
@@ -2202,6 +2374,205 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         VoiceConnectionState = VoiceConnectionState.Disconnected;
     }
 
+    // ---- Overlay window management ----
+
+    private void ShowOverlay()
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            if (_overlayWindow != null) return;
+            _overlayWindow = new OverlayWindow();
+            _overlayWindow.SetPosition(_overlayPositionX, _overlayPositionY);
+            _overlayWindow.SetBackgroundOpacity(_overlayOpacity / 100.0);
+            RefreshOverlay();
+            _overlayWindow.Show();
+            StartOverlayCleanupTimer();
+        });
+    }
+
+    private void HideOverlay()
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            StopOverlayCleanupTimer();
+            _overlayWindow?.Close();
+            _overlayWindow = null;
+        });
+    }
+
+    private void StartOverlayCleanupTimer()
+    {
+        if (_overlayCleanupTimer != null) return;
+        _overlayCleanupTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(5)
+        };
+        _overlayCleanupTimer.Tick += OverlayCleanupTick;
+        _overlayCleanupTimer.Start();
+    }
+
+    private void StopOverlayCleanupTimer()
+    {
+        if (_overlayCleanupTimer == null) return;
+        _overlayCleanupTimer.Stop();
+        _overlayCleanupTimer.Tick -= OverlayCleanupTick;
+        _overlayCleanupTimer = null;
+    }
+
+    private void OverlayCleanupTick(object? sender, EventArgs e)
+    {
+        if (_overlayWindow == null || !_overlayAutoHideEnabled) return;
+
+        var cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(_overlayAutoHideSeconds).Ticks;
+        var stale = _overlayWindow.Entries
+            .Where(entry => !entry.IsReceiving && !entry.IsTransmitting && entry.LastActivityTicks < cutoff)
+            .ToList();
+
+        foreach (var entry in stale)
+            _overlayWindow.Entries.Remove(entry);
+    }
+
+    /// <summary>
+    /// Rebuild overlay entries from current radio state.
+    /// Only shows radios that are currently active (TX/RX or have recent transmissions),
+    /// sorted by most-recently-active first.
+    /// </summary>
+    private void RefreshOverlay()
+    {
+        if (_overlayWindow == null) return;
+
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            _overlayWindow.Entries.Clear();
+
+            var radios = RadioPanels.Where(r => r.IsEnabled).ToList();
+            if (EnableEmergencyRadio && EmergencyRadio.IsEnabled)
+                radios.Add(EmergencyRadio);
+
+            foreach (var radio in radios)
+            {
+                bool isRx = radio.Status == RadioStatus.Receiving;
+                bool isTx = radio.Status == RadioStatus.Transmitting || radio.Status == RadioStatus.Broadcasting;
+                string lastTx = radio.RecentTransmissions.Count > 0 ? radio.RecentTransmissions[0].Text : "";
+
+                // Only include active radios
+                if (!isRx && !isTx && string.IsNullOrWhiteSpace(lastTx)) continue;
+
+                var entry = new OverlayRadioEntry
+                {
+                    Label = radio.Label,
+                    FreqDisplay = radio.FreqId.ToString(),
+                    Hotkey = radio.Hotkey,
+                    ShowHotkey = OverlayShowRadioKeybind,
+                    IsReceiving = isRx,
+                    IsTransmitting = isTx,
+                    LastTransmission = lastTx,
+                    LastActivityTicks = (isRx || isTx) ? DateTime.UtcNow.Ticks : DateTime.UtcNow.Ticks - 1
+                };
+                _overlayWindow.Entries.Add(entry);
+            }
+
+            SortOverlayEntries();
+        });
+    }
+
+    /// <summary>
+    /// Sort overlay entries so that the most recently active radio is on top.
+    /// </summary>
+    private void SortOverlayEntries()
+    {
+        if (_overlayWindow == null) return;
+
+        var sorted = _overlayWindow.Entries.OrderByDescending(e => e.LastActivityTicks).ToList();
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            int oldIndex = _overlayWindow.Entries.IndexOf(sorted[i]);
+            if (oldIndex != i)
+                _overlayWindow.Entries.Move(oldIndex, i);
+        }
+    }
+
+    /// <summary>
+    /// Incrementally update (or insert) an overlay entry for the given frequency on RX events.
+    /// Entries are added when they become active and sorted by most-recently-active.
+    /// </summary>
+    private void UpdateOverlayForFreq(int freqId, bool isReceiving, string? lastTx = null)
+    {
+        if (_overlayWindow == null) return;
+
+        var freqStr = freqId.ToString();
+        var entry = _overlayWindow.Entries.FirstOrDefault(e => e.FreqDisplay == freqStr);
+
+        if (entry == null)
+        {
+            // Radio just became active — find the source radio and create an entry
+            var radio = RadioPanels.FirstOrDefault(r => r.IsEnabled && r.FreqId == freqId);
+            if (radio == null && EnableEmergencyRadio && EmergencyRadio.FreqId == freqId)
+                radio = EmergencyRadio;
+            if (radio == null) return;
+
+            entry = new OverlayRadioEntry
+            {
+                Label = radio.Label,
+                FreqDisplay = freqStr,
+                Hotkey = radio.Hotkey,
+                ShowHotkey = OverlayShowRadioKeybind,
+                IsReceiving = isReceiving,
+                LastTransmission = lastTx ?? "",
+                LastActivityTicks = DateTime.UtcNow.Ticks
+            };
+            _overlayWindow.Entries.Insert(0, entry);
+        }
+        else
+        {
+            entry.IsReceiving = isReceiving;
+            if (lastTx != null)
+                entry.LastTransmission = lastTx;
+            entry.LastActivityTicks = DateTime.UtcNow.Ticks;
+        }
+
+        SortOverlayEntries();
+    }
+
+    /// <summary>
+    /// Update transmit status in the overlay for the active radio.
+    /// </summary>
+    private void UpdateOverlayTransmitState(int freqId, bool isTransmitting)
+    {
+        if (_overlayWindow == null) return;
+
+        var freqStr = freqId.ToString();
+        var entry = _overlayWindow.Entries.FirstOrDefault(e => e.FreqDisplay == freqStr);
+
+        if (entry == null && isTransmitting)
+        {
+            // Radio just became active via TX — create an entry
+            var radio = RadioPanels.FirstOrDefault(r => r.IsEnabled && r.FreqId == freqId);
+            if (radio == null && EnableEmergencyRadio && EmergencyRadio.FreqId == freqId)
+                radio = EmergencyRadio;
+            if (radio == null) return;
+
+            entry = new OverlayRadioEntry
+            {
+                Label = radio.Label,
+                FreqDisplay = freqStr,
+                Hotkey = radio.Hotkey,
+                ShowHotkey = OverlayShowRadioKeybind,
+                IsTransmitting = true,
+                LastActivityTicks = DateTime.UtcNow.Ticks
+            };
+            _overlayWindow.Entries.Insert(0, entry);
+        }
+        else if (entry != null)
+        {
+            entry.IsTransmitting = isTransmitting;
+            if (isTransmitting)
+                entry.LastActivityTicks = DateTime.UtcNow.Ticks;
+        }
+
+        SortOverlayEntries();
+    }
+
     private void OnPropertyChanged([CallerMemberName] string? name = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
@@ -2209,6 +2580,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public void Dispose()
     {
+        StopOverlayCleanupTimer();
+        HideOverlay();
         _hook?.Dispose();
         _backend?.Dispose();
         _audio?.Dispose();

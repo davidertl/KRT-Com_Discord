@@ -16,7 +16,7 @@ public sealed class ReconnectManager : IDisposable
     private const int MaxDelayMs     = 30_000;   // 30 s cap
     private const double BackoffFactor = 2.0;
     private const double JitterFactor  = 0.3;    // ±30 % randomness
-    private const int MaxRetries = 10;
+    private const int MaxRetries = 50;
 
     // ---- State ----
     private int _attempt;

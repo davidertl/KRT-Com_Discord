@@ -17,6 +17,9 @@ public class CompanionConfig
     // Auth token from last successful login
     public string AuthToken { get; set; } = "";
 
+    // Display name from last successful login
+    public string LoggedInDisplayName { get; set; } = "";
+
     // Accepted privacy policy version
     public string AcceptedPolicyVersion { get; set; } = "";
 
@@ -28,6 +31,22 @@ public class CompanionConfig
     public bool TurnOnEmergencyOnStartup { get; set; } = true;
     public bool DebugLoggingEnabled { get; set; } = false;
     public bool EnableEmergencyRadio { get; set; } = true;
+
+    // Granular beep/sound settings
+    public bool PlaySoundOnTransmit { get; set; } = true;
+    public bool PlaySoundOnReceive { get; set; } = true;
+    public bool PlaySoundOnBegin { get; set; } = true;
+    public bool PlaySoundOnEnd { get; set; } = true;
+
+    // Overlay settings
+    public bool OverlayEnabled { get; set; } = false;
+    public bool OverlayShowRank { get; set; } = false;
+    public bool OverlayShowRadioKeybind { get; set; } = false;
+    public int OverlayPositionX { get; set; } = 20;
+    public int OverlayPositionY { get; set; } = 20;
+    public int OverlayOpacity { get; set; } = 80;
+    public bool OverlayAutoHideEnabled { get; set; } = true;
+    public int OverlayAutoHideSeconds { get; set; } = 60;
 
     // Master volume (0-125, default 100)
     public int InputVolume { get; set; } = 100;

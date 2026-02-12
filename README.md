@@ -2,7 +2,7 @@
 
 KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
-**Status:** Alpha 0.0.6  
+**Status:** Alpha 0.0.8  
 
 Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr verfügbar. Da das Plugin mit Teamspeak wirklich fantastisch funktioniert hat, wollte ich eine ähnliche Lösung für Discord schaffen. Das Projekt ist komplett Open Source und wird von mir in meiner Freizeit entwickelt. Es ist kostenlos, frei verfügbar und soll es auch bleiben.
 
@@ -245,6 +245,18 @@ SQLite (WAL Mode) mit folgendem Schema:
 ---
 
 ## Changelog
+
+### Alpha 0.0.8
+
+**Neue Features:**
+- **In-Game Overlay**: Neues topmost, transparentes, klick-durchlässiges Overlay-Fenster das aktive Funkfrequenzen und letzte Übertragungen anzeigt.
+- **Overlay-Einstellungen**: Ein/Aus-Toggle, Rang anzeigen, Keybind anzeigen, Hintergrund-Opazität (10–100%), Position (X/Y Pixel).
+- **Nur aktive Radios im Overlay**: Idle-Radios ohne Aktivität werden ausgeblendet.
+- **Sortierung nach Aktivität**: Das zuletzt aktive Radio steht immer oben.
+- **Letzte Übertragung prominent rechts**: Benutzername + Uhrzeit der letzten Übertragung wird groß und rechtsbündig angezeigt.
+- **Auto-Hide**: Inaktive Radios werden nach konfigurierbarer Zeit automatisch ausgeblendet (Standard: 60 Sekunden, einstellbar 5–300s).
+- **Hintergrund-Opazität**: Nur der Hintergrund wird transparent, Text bleibt immer lesbar.
+- **Live-Sync**: Position, Opazität und Einstellungsänderungen werden sofort im Overlay aktualisiert.
 
 ### Alpha 0.0.6
 

@@ -11,7 +11,7 @@
 # Low priority:
 -ingame overlay wer zuletzt auf welcher Frequenz gefunkt hat. 
     -essentiell mit on/off toggle im "App Settings" Tab
-    -frage bitte bevor du dieses Projekt anfängst nach deutlichen Instruktionen. 
+    -zuerst noch planen was alles nötig ist für Overlay
     -optional mit Rang (kann erst später implementiert werden, wenn ich weiß wie das Kartell die Daten angelegt hat)
 # Wunschliste:
 -speech priority by user rank

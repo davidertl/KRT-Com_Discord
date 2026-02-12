@@ -1,5 +1,5 @@
 
-# Anforderungen und eingesetzte Installer-Technologie
+# Companion-App - an AI summary ;-)
 
 Dieses Dokument beschreibt die Anforderungen und die empfohlene Installer-Technologie für die **das-KRT Companion App** unter Windows 11.
 

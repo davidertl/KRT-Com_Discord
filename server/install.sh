@@ -2808,7 +2808,18 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Access Denied</h2><p>Your account has been banned from this server.</p><p style="color:#888">You can close this window.</p></body></html>');
       }
 
-      // Fetch/upsert guild member via bot for display name
+      // Fetch guild member via bot to get the server nickname (not the Discord global username)
+      if (_bot && typeof _bot.fetchGuildMember === 'function') {
+        try {
+          const member = await _bot.fetchGuildMember(String(discordUserId), String(matchedGuildId));
+          if (member && member.displayName) {
+            displayName = member.displayName;
+          }
+        } catch (e) {
+          console.warn('[oauth] fetchGuildMember failed, using Discord username:', e.message);
+        }
+      }
+
       // Issue signed auth token (uid = hashed ID)
       const authPayload = {
         uid: hashedId,
@@ -2902,7 +2913,20 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       return res.status(400).json({ ok: false, error: 'bad action' });
     }
     const ts = Date.now();
-    const hashedUid = discordUserId ? hashUserId(discordUserId) : null;
+
+    // Prefer user identity from signed Bearer token (already hashed)
+    let hashedUid = null;
+    const authHeader = req.headers['authorization'] || '';
+    if (authHeader.startsWith('Bearer ')) {
+      const tokenPayload = verifyToken(authHeader.slice(7), tokenSecret);
+      if (tokenPayload && tokenPayload.uid) {
+        hashedUid = tokenPayload.uid;
+      }
+    }
+    // Fallback: hash raw Discord ID from body (legacy / admin-token callers)
+    if (!hashedUid && discordUserId) {
+      hashedUid = hashUserId(discordUserId);
+    }
     const row = {
       freq_id: f,
       discord_user_id: hashedUid,

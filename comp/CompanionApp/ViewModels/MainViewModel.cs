@@ -999,7 +999,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        var userName = string.IsNullOrWhiteSpace(DiscordUserId) ? "You" : $"You ({DiscordUserId})";
+        var userName = string.IsNullOrWhiteSpace(LoggedInDisplayName) ? "You" : LoggedInDisplayName;
         var timestamp = $"{DateTime.Now:HH:mm} - {userName} (Broadcast)";
 
         foreach (var radio in _activeBroadcastRadios)
@@ -1487,6 +1487,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
+            // Mark streaming BEFORE notifying backend so the self-echo guard
+            // in OnRxStateChanged fires even if the server broadcasts before HTTP responds.
+            IsStreaming = true;
+
             // Notify backend of TX start (non-fatal if fails)
             try
             {
@@ -1497,8 +1501,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 StatusText = $"Backend notify failed: {backendEx.Message}";
                 // Continue - audio capture still works
             }
-
-            IsStreaming = true;
             if (radio.IsEmergencyRadio)
                 _beepService?.PlayEmergencyTxBeep();
             else
@@ -1551,7 +1553,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         // Log the transmission to recent activity
         if (radio != null)
         {
-            var userName = string.IsNullOrWhiteSpace(DiscordUserId) ? "You" : $"You ({DiscordUserId})";
+            var userName = string.IsNullOrWhiteSpace(LoggedInDisplayName) ? "You" : LoggedInDisplayName;
             radio.AddTransmission($"{DateTime.Now:HH:mm} - {userName}");
         }
 
@@ -1673,6 +1675,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         Application.Current.Dispatcher.Invoke(() =>
         {
+            // Ignore RX events from ourselves (we are currently transmitting)
+            if (IsStreaming && _activeRadio != null && _activeRadio.FreqId == freqId)
+                return;
+
             // Find radio panel matching the frequency
             var matchingRadio = RadioPanels.FirstOrDefault(r => r.IsEnabled && !r.IsMuted && r.FreqId == freqId);
             if (matchingRadio == null && EnableEmergencyRadio && EmergencyRadio.IsEnabled && !EmergencyRadio.IsMuted && EmergencyRadio.FreqId == freqId)

@@ -258,7 +258,7 @@
                           <ItemsControl ItemsSource="{Binding EmergencyRadio.RecentTransmissions}" MaxHeight="50">
                             <ItemsControl.ItemTemplate>
                               <DataTemplate>
-                                <TextBlock Text="{Binding}" Foreground="#FF6644" FontSize="10" FontWeight="SemiBold"
+                                <TextBlock Text="{Binding Text}" Foreground="#FF6644" FontSize="10" FontWeight="SemiBold"
                                            TextTrimming="CharacterEllipsis"/>
                               </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -444,7 +444,7 @@
                           <ItemsControl ItemsSource="{Binding RecentTransmissions}" MaxHeight="40">
                             <ItemsControl.ItemTemplate>
                               <DataTemplate>
-                                <TextBlock Text="{Binding}" Foreground="{StaticResource TextSecondary}" FontSize="9" 
+                                <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextSecondary}" FontSize="9" 
                                            TextTrimming="CharacterEllipsis"/>
                               </DataTemplate>
                             </ItemsControl.ItemTemplate>

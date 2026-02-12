@@ -331,6 +331,9 @@ public class RadioPanelViewModel : INotifyPropertyChanged
     {
         if (isReceiving)
         {
+            // Don't override Transmitting/Broadcasting status with Receiving
+            if (Status == RadioStatus.Transmitting || Status == RadioStatus.Broadcasting)
+                return;
             Status = RadioStatus.Receiving;
         }
         else if (Status == RadioStatus.Receiving)

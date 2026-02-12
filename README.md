@@ -70,15 +70,36 @@ Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr v
    ├─ DSGVO Module (Auto-Cleanup)
    └─ Crypto Module (HMAC-SHA256)
 ```
+## Funkkonzept
 
-### Push-to-Talk Ablauf
+### Grundprinzip
+- Jeder User kann mehreren Funkfrequenzen zugeordnet sein
+- Pro Frequenz kann ein eigener Push-to-Talk-Hotkey festgelegt werden (optional)
+- Hotkeys können auch wieder gelöscht werden
+- Empfang erfolgt passiv (Mithören mehrerer Frequenzen möglich)
+- Senden erfolgt in der Regel gezielt auf eine Frequenz
+- Send-All Funktion auf ausgewählte Frequenzen mit ausgewähltem Hotkey Broadcasten
+- Ton bei beginn und Ende des Funkspruchs
+- Companion App (.NET) auf dem PC läuft lokal und greift Audio und Hotkeys ab und sendet diese an den Server
+
+### Funklogik
+- Nur ein aktiver Sender je Frequenz (pending)
+- MuteDiscord während PTT (pending)
+
+### Nutzerverhalten
+- User bleibt im Gruppen-Voice-Channel
+- Funk ist davon logisch getrennt
+- Hotkeys bestimmen die aktive Funkfrequenz
+- Rechteverwaltung pro Frequenz? (pending, low priority)
+  
+#### Push-to-Talk Ablauf
 
 1. **PTT-Taste** → Companion App erkennt systemweiten Hotkey.
 2. **Audio-Capture** startet, Opus-Pakete werden über Voice-WebSocket gestreamt.
 3. **TX-Event** wird an Backend gemeldet → Realtime-Broadcast an alle Listener auf der Frequenz.
 4. **Half-Duplex** wird clientseitig erzwungen (kein gleichzeitiges Senden und Empfangen).
 
-### Identität & Anzeigenamen
+#### Identität & Anzeigenamen
 
 - **Verifizierte Identität**: Über Discord OAuth2 (kein Self-Reporting möglich).
 - **Mitgliedschaft**: Guild-Mitgliedschaft wird serverseitig via Discord Bot geprüft.

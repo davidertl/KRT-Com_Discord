@@ -2,7 +2,7 @@
 
 KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
-**Status:** Alpha 0.0.5  
+**Status:** Alpha 0.0.6  
 
 Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr verfügbar. Da das Plugin mit Teamspeak wirklich fantastisch funktioniert hat, wollte ich eine ähnliche Lösung für Discord schaffen. Das Projekt ist komplett Open Source und wird von mir in meiner Freizeit entwickelt. Es ist kostenlos, frei verfügbar und soll es auch bleiben.
 
@@ -220,6 +220,26 @@ SQLite (WAL Mode) mit folgendem Schema:
 - [ ] Externe Statusanzeige (Web-Interface)
 - [ ] Under-Attack-Mode (Automatisierte Abwehr)
 - [ ] Multi-Guild Support (aktuell auf eine Guild limitiert)
+
+---
+
+## Changelog
+
+### Alpha 0.0.6
+
+**Bugfixes:**
+- **OAuth Login Redirect**: Nach Discord-Autorisierung zeigt der Browser jetzt eine Erfolgsseite ("Login Successful") statt einer leeren Seite. *wuhu*
+- **Voice WebSocket 403**: .NET `ClientWebSocket` sendet automatisch einen `Origin`-Header, der vom Server fälschlicherweise als Browser-Request abgelehnt wurde. Der Server erlaubt jetzt Origin-Headers der eigenen Domain.
+- **TX Event Broadcast**: Der `/tx/event`-Endpoint hat Events gespeichert, aber nicht an andere Clients weitergeleitet. Transmissionen sind jetzt zwischen mehreren Companion-Instanzen sicht- und hörbar.
+
+**Verbesserungen:**
+- **WebSocket Upgrade Error-Handling**: Der Upgrade-Handler fängt jetzt Fehler ab und loggt sie, statt Verbindungen stillschweigend zu verwerfen.
+- **Traefik X-Forwarded-Proto**: `set-proto-https`-Middleware wird jetzt auch auf den HTTPS-Router angewendet, damit die DSGVO-HTTPS-Prüfung bei WebSocket-Upgrades korrekt funktioniert.
+- **Origin-Whitelist Logging**: Beim Serverstart wird die erlaubte Origin-Domain geloggt (`[http] WebSocket origin whitelist: ...`).
+
+### Alpha 0.0.5
+
+- Initiales Release mit Voice-Relay, Discord OAuth2, DSGVO-Modul, Admin-CLI und Companion App.
 
 ---
 

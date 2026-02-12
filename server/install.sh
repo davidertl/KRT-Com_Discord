@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.5
+##version alpha-0.0.6
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.5"
+VERSION="Alpha 0.0.6"
 echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
@@ -214,6 +214,12 @@ log_ok "systemd Service enabled"
 # .env Konfiguration (Secrets & Discord Credentials)
 # --------------------------------------------------
 log_info "Konfiguriere .env Datei"
+
+# Pre-read existing domain from .env (needed later for Traefik config)
+EXISTING_DOMAIN=""
+if [ -f "$ENV_FILE" ]; then
+  EXISTING_DOMAIN="$(grep -oP '^DOMAIN=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+fi
 
 CREATE_ENV="y"
 if [ -f "$ENV_FILE" ]; then
@@ -445,7 +451,10 @@ log_input ""
 log_input "=== Traefik / TLS Konfiguration ==="
 log_input "Für Let's Encrypt TLS muss eine Domain auf die Server-IP zeigen."
 log_input ""
-read -r -p "$(echo -e "${CYAN}Domain (z.B. das-krt.com, leer = kein TLS):${NC} ")" DOMAIN
+PROMPT_DOMAIN="Domain (z.B. das-krt.com, leer = kein TLS)"
+[ -n "$EXISTING_DOMAIN" ] && PROMPT_DOMAIN="$PROMPT_DOMAIN [${EXISTING_DOMAIN}]"
+read -r -p "$(echo -e "${CYAN}${PROMPT_DOMAIN}:${NC} ")" INPUT_DOMAIN
+DOMAIN="${INPUT_DOMAIN:-$EXISTING_DOMAIN}"
 read -r -p "$(echo -e "${CYAN}E-Mail für Let's Encrypt Zertifikat:${NC} ")" ACME_EMAIL
 
 if [ -n "$DOMAIN" ]; then
@@ -511,6 +520,8 @@ http:
       service: backend
       tls:
         certResolver: letsencrypt
+      middlewares:
+        - set-proto-https
 
     das-krt-http:
       rule: "Host(\`${DOMAIN}\`)"
@@ -558,7 +569,9 @@ LimitNOFILE=65536
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=${TRAEFIK_DIR} ${APP_ROOT}/logs
+ReadWritePaths=${TRAEFIK_DIR}
+ReadWritePaths=${APP_ROOT}/logs
+PrivateTmp=false
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
@@ -566,12 +579,27 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 EOF
 
-  chown -R "$ADMIN_USER:$ADMIN_USER" "$TRAEFIK_DIR" 2>/dev/null || true
-  # acme.json must be owned by root (Traefik runs as root for port 80/443 binding)
-  chown root:root "$TRAEFIK_DIR/acme.json" 2>/dev/null || true
+  # Traefik runs as root for port binding — own entire dir as root
+  chown -R root:root "$TRAEFIK_DIR" 2>/dev/null || true
+  chmod 600 "$TRAEFIK_DIR/acme.json" 2>/dev/null || true
+
+  # Ensure log files exist and are writable by Traefik (runs as root)
+  touch "$APP_ROOT/logs/traefik.log" "$APP_ROOT/logs/traefik-access.log"
+  chown root:root "$APP_ROOT/logs/traefik.log" "$APP_ROOT/logs/traefik-access.log"
+  chmod 644 "$APP_ROOT/logs/traefik.log" "$APP_ROOT/logs/traefik-access.log"
 
   systemctl daemon-reload
   systemctl enable traefik >/dev/null 2>&1 || true
+  # Update DOMAIN in .env if it exists
+  if [ -f "$ENV_FILE" ]; then
+    if grep -q '^DOMAIN=' "$ENV_FILE"; then
+      sed -i "s|^DOMAIN=.*|DOMAIN=${DOMAIN}|" "$ENV_FILE"
+    else
+      echo "DOMAIN=${DOMAIN}" >> "$ENV_FILE"
+    fi
+    log_ok "Domain in .env aktualisiert: $DOMAIN"
+  fi
+
   log_ok "Traefik konfiguriert für Domain: $DOMAIN"
   log_ok "Traefik systemd Service erstellt und aktiviert"
   log_ok "Let's Encrypt TLS mit HTTP-Challenge"
@@ -764,47 +792,65 @@ function migrateUserIdHashing(db) {
     httpServer._setVoiceRelay(voiceRelay);
   }
 
+  // Pre-compute own domain origin for WebSocket origin checks (once at startup)
+  let ownDomainOrigin = null;
+  if (discordRedirectUri) {
+    try { ownDomainOrigin = new URL(discordRedirectUri).origin; } catch { /* invalid redirect URI */ }
+  }
+  console.log('[http] WebSocket origin whitelist:', ownDomainOrigin || '(none, only origin-less connections allowed)');
+
   // Route WebSocket upgrades by path
   // DSGVO HTTPS enforcement: reject WS upgrades that didn't come through TLS (Traefik).
   // For upgrade requests, Express trust-proxy doesn't apply, so we check the raw header
   // but ONLY trust it when the connection comes from loopback (i.e. from Traefik).
   httpServer.on('upgrade', (req, socket, head) => {
-    if (dsgvo && typeof dsgvo.getStatus === 'function') {
-      const status = dsgvo.getStatus();
-      if (status.dsgvoEnabled) {
-        // Check if connection comes from loopback (Traefik)
-        const remoteAddr = req.socket.remoteAddress || '';
-        const isLoopback = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
-        // When from loopback (Traefik), trust X-Forwarded-Proto; otherwise assume plain http
-        const proto = isLoopback
-          ? (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim()
-          : 'http';
-        if (proto !== 'https') {
-          console.log('[http] DSGVO: rejected WS upgrade (not HTTPS), remote:', remoteAddr, 'proto:', proto);
+    try {
+      if (dsgvo && typeof dsgvo.getStatus === 'function') {
+        const status = dsgvo.getStatus();
+        if (status.dsgvoEnabled) {
+          // Check if connection comes from loopback (Traefik)
+          const remoteAddr = req.socket.remoteAddress || '';
+          const isLoopback = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+          // When from loopback (Traefik), trust X-Forwarded-Proto; otherwise assume plain http
+          const proto = isLoopback
+            ? (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim()
+            : 'http';
+          if (proto !== 'https') {
+            console.log('[http] DSGVO: rejected WS upgrade (not HTTPS), remote:', remoteAddr, 'proto:', proto);
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        }
+      }
+
+      // WebSocket origin check: reject connections from browsers with unknown Origin
+      // Allow if Origin matches our own domain (companion app on some .NET runtimes sends it)
+      // Allow connections with no Origin header (desktop apps, curl, etc.)
+      const wsOrigin = req.headers.origin || '';
+      if (wsOrigin && wsOrigin !== 'null') {
+        if (!ownDomainOrigin || wsOrigin !== ownDomainOrigin) {
+          console.log('[http] Rejected WebSocket with browser Origin:', wsOrigin);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
         }
       }
-    }
 
-    // WebSocket origin check: reject connections from browsers with unknown Origin
-    const wsOrigin = req.headers.origin || '';
-    if (wsOrigin) {
-      console.log('[http] Rejected WebSocket with browser Origin:', wsOrigin);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (pathname === '/voice') {
-      voiceRelay.handleUpgrade(req, socket, head);
-    } else if (pathname === '/ws') {
-      wsHub.handleUpgrade(req, socket, head);
-    } else {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
+      const pathname = new URL(req.url, 'http://localhost').pathname;
+      console.log('[http] WS upgrade:', pathname, 'origin:', wsOrigin || '(none)');
+      if (pathname === '/voice') {
+        voiceRelay.handleUpgrade(req, socket, head);
+      } else if (pathname === '/ws') {
+        wsHub.handleUpgrade(req, socket, head);
+      } else {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+      }
+    } catch (err) {
+      console.error('[http] WebSocket upgrade error:', err);
+      try { socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n'); } catch { /* ignore */ }
+      try { socket.destroy(); } catch { /* ignore */ }
     }
   });
 
@@ -2693,7 +2739,11 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (!discordClientId || !discordRedirectUri) {
       return res.status(500).send('Discord OAuth2 not configured on this server');
     }
-    const url = 'https://discord.com/oauth2/authorize?response_type=code';
+    // Register state so the callback can find it later
+    pendingOAuth.set(state, null);
+    pendingOAuthTimestamps.set(state, Date.now());
+    const scope = 'identify guilds';
+    let url = 'https://discord.com/oauth2/authorize?response_type=code';
     url += '&client_id=' + encodeURIComponent(discordClientId);
     url += '&scope=' + encodeURIComponent(scope);
     url += '&state=' + encodeURIComponent(state);
@@ -2713,6 +2763,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
+          client_id: discordClientId,
+          client_secret: discordClientSecret,
           grant_type: 'authorization_code',
           code: String(code),
           redirect_uri: discordRedirectUri,
@@ -2720,12 +2772,32 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       });
       const tokenData = await tokenResp.json();
       const discordAccessToken = tokenData.access_token;
+      if (!discordAccessToken) {
+        console.error('[oauth] Token exchange failed:', tokenData);
+        pendingOAuth.set(state, { error: 'server_error', timestamp: Date.now() });
+        return res.status(500).send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Login Failed</h2><p>Token exchange with Discord failed.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
       const userResp = await fetch('https://discord.com/api/v10/users/@me', {
         headers: { Authorization: 'Bearer ' + discordAccessToken },
       });
       const user = await userResp.json();
       const discordUserId = user.id;
       const discordUsername = user.global_name || user.username || user.id;
+
+      // Fetch user's guilds to verify membership
+      const guildsResp = await fetch('https://discord.com/api/v10/users/@me/guilds', {
+        headers: { Authorization: 'Bearer ' + discordAccessToken },
+      });
+      const userGuilds = await guildsResp.json();
+      let matchedGuildId = null;
+      if (Array.isArray(allowedGuildIds) && allowedGuildIds.length > 0) {
+        const userGuildIds = Array.isArray(userGuilds) ? userGuilds.map(g => String(g.id)) : [];
+        matchedGuildId = allowedGuildIds.find(gid => userGuildIds.includes(String(gid))) || null;
+      }
+      if (!matchedGuildId) {
+        pendingOAuth.set(state, { error: 'not_in_guild', timestamp: Date.now() });
+        return res.send('<html><body style="background:#1a1a2e;color:#ff4a4a;font-family:sans-serif;text-align:center;padding:60px"><h2>Access Denied</h2><p>You are not a member of the required Discord server.</p><p style="color:#888">You can close this window.</p></body></html>');
+      }
 
       // Hash the raw Discord ID | raw IDs are never stored in the database
       const hashedId = hashUserId(discordUserId);
@@ -2774,6 +2846,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         });
       } catch (e) { console.warn('[oauth] Token revoke failed:', e.message); }
       console.log('[oauth] Login OK: ' + hashedId.substring(0, 12) + '... (' + displayName + ') in guild ' + matchedGuildId);
+      res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>\u2713 Login Successful</h2><p>Logged in as <strong>' + displayName + '</strong></p><p style="color:#888">You can close this window and return to the companion app.</p></body></html>');
     } catch (e) {
       console.error('[oauth] Callback error:', e);
       pendingOAuth.set(state, { error: 'server_error', timestamp: Date.now() });
@@ -2848,6 +2921,11 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       meta: meta || null,
     };
     const listenerCount = (db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f) || {}).cnt || 0;
+
+    // Broadcast TX event to WebSocket subscribers (voice relay + ws hub)
+    if (typeof onTxEventFn === 'function') {
+      onTxEventFn(payload);
+    }
 
     res.json({ ok: true, data: payload, listener_count: listenerCount });
   });

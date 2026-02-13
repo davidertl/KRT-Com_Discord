@@ -280,4 +280,3 @@ SQLite (WAL Mode) mit folgendem Schema:
 
 Dieses Projekt steht unter der [Apache License 2.0](LICENSE).  
 **Jede kommerzielle Nutzung (Geld verdienen mit dieser Software) erfordert eine separate Genehmigung.**  
-Siehe [COMMERCIAL_HOSTING_POLICY.md](COMMERCIAL_HOSTING_POLICY.md) für Details.

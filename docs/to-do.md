@@ -6,9 +6,7 @@
 # Low priority:
 
 
-- [x] companion app:when receiving broadcasts, you hear the audio only on the pan and vol settings of the first radio that is receiving the broadcast, even if multiple radios are receiving the same broadcast. This should be fixed so that the pan is avaraged between the radios and vol settings are taken the highest of the receiving radios, so that if one radio is set to 100% and another to 50% the resulting volume is 100% and not 75%.
-
-# Wunschliste:
+# General wishlist (quasi meine Notizen damit ich nix vergesse):
 -speech priority by user rank
   - sync user rank from discord roles (custom table which lists discord groupid and corresponding rank in the app)
     -discord roles that have no corresponding rank in the app should be ignored, so that they don't get assigned a default rank.
@@ -26,10 +24,38 @@ optional add the checkmark to this setting to add the keybind for the radio.
 # Security Audit and debugging:
 check security autit notes and check which ones are already fixed, for the one thar are fixed mark them as fixed.
 
-Security Audit Notes (as of 2025-02-17, updated 2026-02-09):
-Security:
+## Security audit notes for version 0.0.8. AI generated:
 
-  
+### 🔴 Critical
+
+- [ ] **Missing `discordUserId` destructuring in `/auth/login`**: The variable `discordUserId` is referenced but never destructured from `req.body` in the handler. This causes a `ReferenceError` at runtime (in debug mode), potentially leaking stack trace information. Add proper destructuring and validate that it is a non-empty string matching Discord snowflake format.
+
+### 🟠 High
+
+- [ ] **SQL injection pattern (template literal table names)**: `migrateUserIdHashing` and `deleteUser` in `install.sh` interpolate table names via JS template literals (`${table}`). Currently the `tables` array is hardcoded so not directly exploitable, but this pattern is fragile — any future refactoring introducing user-controlled values would create a direct SQL injection vector. Use a whitelist check or parameterize differently.
+- [ ] **Undefined variable `kicked` in `/admin/unban`**: The handler logs `${kicked}` but only defines `removed`. This causes a `ReferenceError` at runtime, crashing the request and potentially leaking stack trace info. Replace with `removed`.
+- [ ] **Admin token plaintext storage & non-timing-safe comparison**: `ADMIN_TOKEN` is stored in plaintext in `.env` and `config.json`, transmitted via `x-admin-token` header, and compared with `!==` (not timing-safe). Use `crypto.timingSafeEqual()` for comparison. Consider hashing the stored token.
+- [ ] **No CSRF protection on admin POST endpoints**: All admin state-changing endpoints (`/admin/ban`, `/admin/unban`, `/admin/dsgvo/delete-user`, `/admin/dsgvo/debug`, etc.) rely solely on the `x-admin-token` header. If an attacker discovers the token, there is no secondary CSRF mechanism (no nonce, no session binding).
+- [ ] **OAuth2 `state` parameter no expiry cleanup visible**: The `pendingOAuth` map stores OAuth state tokens but no cleanup/expiry mechanism is visible in the code. Old state tokens could accumulate (memory leak) and potentially be replayed. Add a `setTimeout` or periodic sweep to expire states after e.g. 5 minutes.
+
+### 🟡 Medium
+
+- [ ] **Auth token ID truncated to 64 chars (collision risk)**: `token_id` in the DB uses `authToken.substring(0, 64)`. Different tokens sharing the same 64-char prefix would overwrite each other. Store the full hash or use a separate UUID as the DB key.
+- [ ] **No rate limiting on voice WebSocket authentication**: The voice relay WebSocket accepts `auth` messages without rate limiting. An attacker could open many connections and brute-force session tokens. Add per-IP connection rate limiting on the upgrade handler.
+- [ ] **No warning when `BIND_HOST` is not `127.0.0.1`**: If an operator changes `BIND_HOST` to `0.0.0.0` in `.env`, the backend is directly exposed without TLS (Traefik bypassed). Add a startup warning log when `BIND_HOST` is not loopback.
+- [ ] **Companion app config encryption strength unknown**: `ConfigService.cs` imports `System.Security.Cryptography` but `AuthToken`, `AdminToken`, and other sensitive fields are persisted in `config.json`. Verify that encryption uses a strong key derivation (e.g. DPAPI or machine-bound key), not a predictable/hardcoded key.
+- [ ] **90-second ghost session window**: Stale session cleanup uses a 60s timeout with 30s intervals, meaning a disconnected client could remain "active" and receive audio for up to 90 seconds. Reduce the cleanup interval or timeout, and verify `freq_listeners` DB entries are also cleaned up.
+- [ ] **Incomplete JSON escaping in `service.sh`**: The `json_escape` function only handles `\`, `"`, `\n`, `\r`, `\t`. Other control characters (`\b`, `\f`, null bytes, Unicode control chars) are not escaped. A malicious input could cause JSON parsing issues or injection in the backend.
+- [ ] **Discord access token revocation failure silently swallowed**: If the `fetch` to Discord's `/oauth2/token/revoke` fails, only a `console.warn` is emitted. The token remains valid despite the privacy policy claiming immediate revocation. Add retry logic or at minimum log at error level.
+
+### 🟢 Low
+
+- [ ] **No cache headers on `/privacy-policy`**: The endpoint doesn't set `Cache-Control` or `ETag` headers. Clients can't detect policy changes efficiently. Add appropriate cache headers.
+- [ ] **No input validation in `fix_encoding.py`**: `sys.argv[1]` is used directly as a file path without validation. A crafted path could read/write arbitrary files. Add path validation (dev tool, low risk).
+- [ ] **Debug mode couples DSGVO disable**: Enabling debug mode automatically disables DSGVO compliance and extends data retention to 7 days. An operator might inadvertently violate GDPR. Decouple debug logging from DSGVO settings.
+- [ ] **No WebSocket message size limits**: Voice relay `ws.on('message')` parses JSON without checking message size. An attacker could send very large payloads to consume memory. Add `maxPayload` option to the WebSocket server.
+- [ ] **Helmet uses defaults (no strict CSP)**: `app.use(helmet())` uses default configuration without a strict `Content-Security-Policy` or `Permissions-Policy`. The OAuth success redirect page would benefit from a strict CSP. Configure helmet with explicit CSP rules.
+
 
 # Changelog
 

@@ -117,7 +117,7 @@ public static class ConfigService
         }
         catch
         {
-            return plaintext; // Fallback: store as-is if DPAPI fails
+            return ""; // Encryption failed (e.g. user profile issue) — return empty to avoid saving plaintext
         }
     }
 

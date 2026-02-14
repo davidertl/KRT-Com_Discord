@@ -124,6 +124,19 @@ public sealed class ReconnectManager : IDisposable
 
     private async void ScheduleNextAttempt()
     {
+        try
+        {
+            await ScheduleNextAttemptCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"Reconnect scheduling error: {ex.Message}");
+            TransitionTo(VoiceConnectionState.Failed);
+        }
+    }
+
+    private async Task ScheduleNextAttemptCoreAsync()
+    {
         if (_attempt >= MaxRetries)
         {
             Log?.Invoke($"Reconnect failed after {MaxRetries} attempts.");

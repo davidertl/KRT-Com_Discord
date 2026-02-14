@@ -18,7 +18,7 @@ namespace CompanionApp.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
-    public const string AppVersion = "Alpha 0.0.9";
+    public const string AppVersion = "Alpha 0.0.10";
 
     private CompanionConfig _config = new();
     private HotkeyHook? _hook;
@@ -1067,7 +1067,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             // Open browser to backend's OAuth redirect endpoint
             var redirectUrl = $"{baseUrl}/auth/discord/redirect?state={Uri.EscapeDataString(state)}";
-            Process.Start(new ProcessStartInfo(redirectUrl) { UseShellExecute = true });
+            // Validate URL scheme to prevent opening arbitrary protocols
+            if (!Uri.TryCreate(redirectUrl, UriKind.Absolute, out var validUri) ||
+                (validUri.Scheme != "http" && validUri.Scheme != "https"))
+            {
+                OAuthLoginStatus = "Invalid server URL scheme";
+                return false;
+            }
+            Process.Start(new ProcessStartInfo(validUri.AbsoluteUri) { UseShellExecute = true });
 
             // Poll for result (every 2 seconds, up to 3 minutes)
             OAuthLoginStatus = "Waiting for Discord authorization…";
@@ -1145,11 +1152,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private string BuildBaseUrl()
     {
         if (string.IsNullOrWhiteSpace(VoiceHost)) return "";
-        var scheme = VoiceHost.StartsWith("https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
         var cleanHost = VoiceHost
             .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
             .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
             .TrimEnd('/');
+        // Default to HTTPS; only use HTTP for explicit localhost
+        var isLocalhost = cleanHost is "127.0.0.1" or "localhost" or "::1";
+        var scheme = (VoiceHost.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || isLocalhost) ? "http" : "https";
         return $"{scheme}://{cleanHost}:{VoicePort}";
     }
 

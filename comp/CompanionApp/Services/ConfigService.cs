@@ -91,6 +91,25 @@ public static class ConfigService
             RadioStates = config.RadioStates,
             EmergencyRadioState = config.EmergencyRadioState,
             Bindings = config.Bindings,
+            LoggedInDisplayName = config.LoggedInDisplayName,
+            PlaySoundOnTransmit = config.PlaySoundOnTransmit,
+            PlaySoundOnReceive = config.PlaySoundOnReceive,
+            PlaySoundOnBegin = config.PlaySoundOnBegin,
+            PlaySoundOnEnd = config.PlaySoundOnEnd,
+            OverlayEnabled = config.OverlayEnabled,
+            OverlayShowRank = config.OverlayShowRank,
+            OverlayShowRadioKeybind = config.OverlayShowRadioKeybind,
+            OverlayPositionX = config.OverlayPositionX,
+            OverlayPositionY = config.OverlayPositionY,
+            OverlayOpacity = config.OverlayOpacity,
+            OverlayAutoHideEnabled = config.OverlayAutoHideEnabled,
+            OverlayAutoHideSeconds = config.OverlayAutoHideSeconds,
+            DuckingEnabled = config.DuckingEnabled,
+            DuckingLevel = config.DuckingLevel,
+            DuckOnSend = config.DuckOnSend,
+            DuckOnReceive = config.DuckOnReceive,
+            DuckingMode = config.DuckingMode,
+            DuckedProcessNames = config.DuckedProcessNames,
         };
 
         var options = new JsonSerializerOptions
@@ -103,6 +122,9 @@ public static class ConfigService
         File.WriteAllText(GetConfigPath(), json);
     }
 
+    // Application-specific entropy for DPAPI — prevents other same-user processes from decrypting
+    private static readonly byte[] DpapiEntropy = "KRT-Com_Discord_v1_entropy"u8.ToArray();
+
     /// <summary>
     /// Encrypt a string using Windows DPAPI (current-user scope).
     /// Returns a base64 string of the encrypted bytes.
@@ -112,7 +134,8 @@ public static class ConfigService
         try
         {
             var bytes = Encoding.UTF8.GetBytes(plaintext);
-            var encrypted = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
+            var encrypted = ProtectedData.Protect(bytes, DpapiEntropy, DataProtectionScope.CurrentUser);
+            CryptographicOperations.ZeroMemory(bytes);
             return "DPAPI:" + Convert.ToBase64String(encrypted);
         }
         catch
@@ -128,13 +151,24 @@ public static class ConfigService
     private static string UnprotectString(string protectedText)
     {
         if (!protectedText.StartsWith("DPAPI:"))
-            return protectedText; // Not encrypted (legacy config), return as-is
+            return protectedText; // Not encrypted (legacy config) — will be auto-upgraded on next save
 
         try
         {
             var encrypted = Convert.FromBase64String(protectedText.Substring(6));
-            var decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(decrypted);
+            byte[] decrypted;
+            try
+            {
+                decrypted = ProtectedData.Unprotect(encrypted, DpapiEntropy, DataProtectionScope.CurrentUser);
+            }
+            catch
+            {
+                // Fallback: try without entropy for configs encrypted before this update
+                decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
+            }
+            var result = Encoding.UTF8.GetString(decrypted);
+            CryptographicOperations.ZeroMemory(decrypted);
+            return result;
         }
         catch
         {

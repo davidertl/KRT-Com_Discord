@@ -117,7 +117,7 @@ public sealed class VoiceService : IDisposable
 
     // ---- reconnect support ----
     private bool _intentionalDisconnect;
-    private readonly HashSet<int> _activeFrequencies = new();
+    private readonly ConcurrentDictionary<int, byte> _activeFrequencies = new();
 
     // ---- per-frequency E2E audio encryption (AES-256-GCM) ----
     private readonly AudioEncryptionService _audioEncryption = new();
@@ -232,8 +232,11 @@ public sealed class VoiceService : IDisposable
         _ws = new ClientWebSocket();
         _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
 
-        // Determine scheme – if host explicitly starts with https, use wss
-        var scheme = host.StartsWith("https", StringComparison.OrdinalIgnoreCase) ? "wss" : "ws";
+        // Determine scheme – default to wss (encrypted); only use ws for explicit localhost
+        var isLocalhost = host.Replace("https://", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
+            .TrimEnd('/') is "127.0.0.1" or "localhost" or "::1";
+        var scheme = (host.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || isLocalhost) ? "ws" : "wss";
         var cleanHost = host
             .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
             .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
@@ -292,7 +295,7 @@ public sealed class VoiceService : IDisposable
     {
         if (!IsConnected || _ws == null) return false;
 
-        _activeFrequencies.Add(freqId);
+        _activeFrequencies.TryAdd(freqId, 0);
         var msg = new { type = "join", freqId };
         await WsSendAsync(msg, _cts!.Token);
 
@@ -308,7 +311,7 @@ public sealed class VoiceService : IDisposable
     {
         if (!IsConnected || _ws == null) return;
 
-        _activeFrequencies.Remove(freqId);
+        _activeFrequencies.TryRemove(freqId, out _);
         _audioEncryption.RemoveFreqKey(freqId);
         var msg = new { type = "leave", freqId };
         await WsSendAsync(msg, _cts!.Token);
@@ -438,6 +441,8 @@ public sealed class VoiceService : IDisposable
                 else
                 {
                     // Plaintext fallback: [freqId:4][seq:4][opus data]
+                    // SECURITY: No encryption key available — audio sent unencrypted
+                    Status("⚠ Transmitting without encryption (no key for frequency)");
                     packet = new byte[8 + encodedLen];
                     BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(0), _currentFreqId);
                     BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4), _txSequence++);
@@ -1005,7 +1010,7 @@ public sealed class VoiceService : IDisposable
     /// Returns a snapshot of all frequencies that were joined before a disconnect.
     /// Used by ReconnectManager to re-join after reconnection.
     /// </summary>
-    public int[] GetActiveFrequencies() => _activeFrequencies.ToArray();
+    public int[] GetActiveFrequencies() => _activeFrequencies.Keys.ToArray();
 
     /// <summary>
     /// Cleans up old WebSocket / audio resources without clearing

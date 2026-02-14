@@ -50,10 +50,12 @@ public sealed class AudioEncryptionService
 
     /// <summary>
     /// Remove a frequency key (called when leaving a frequency).
+    /// The key material is securely zeroed from memory.
     /// </summary>
     public void RemoveFreqKey(int freqId)
     {
-        _freqKeys.TryRemove(freqId, out _);
+        if (_freqKeys.TryRemove(freqId, out var key))
+            CryptographicOperations.ZeroMemory(key);
     }
 
     /// <summary>
@@ -63,9 +65,14 @@ public sealed class AudioEncryptionService
 
     /// <summary>
     /// Clear all stored keys (called on disconnect / cleanup).
+    /// All key material is securely zeroed from memory.
     /// </summary>
     public void ClearAllKeys()
     {
+        foreach (var kvp in _freqKeys)
+        {
+            CryptographicOperations.ZeroMemory(kvp.Value);
+        }
         _freqKeys.Clear();
     }
 

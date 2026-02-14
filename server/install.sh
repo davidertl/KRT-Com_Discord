@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.9
+##version alpha-0.0.10
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.9"
+VERSION="Alpha 0.0.10"
 echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
@@ -760,7 +760,9 @@ function migrateUserIdHashing(db) {
     usersStore,
     dsgvo,
     bot: null, // set after bot creation
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken: process.env.ADMIN_TOKEN
+      ? crypto.createHash('sha256').update(process.env.ADMIN_TOKEN).digest('hex')
+      : '',
     allowedGuildIds: process.env.DISCORD_GUILD_ID
       ? process.env.DISCORD_GUILD_ID.split(',')
       : [],
@@ -880,6 +882,9 @@ function migrateUserIdHashing(db) {
 
   httpServer.listen(bindPort, bindHost, async () => {
     console.log(`[http] listening on http://${bindHost}:${bindPort}`);
+    if (bindHost !== '127.0.0.1' && bindHost !== 'localhost' && bindHost !== '::1') {
+      console.warn(`[SECURITY WARNING] BIND_HOST is '${bindHost}' — the backend may be directly exposed without TLS. Set BIND_HOST=127.0.0.1 to ensure Traefik handles TLS termination.`);
+    }
     console.log(`[map] loaded ${mapping.size()} channel mappings from ${mapPath}`);
     await bot.start();
   });
@@ -1179,17 +1184,21 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
   // freqId -> Buffer (32 bytes). Generated on first join, deleted when last subscriber leaves.
   const freqKeys = new Map();
 
+  // Per-IP connection rate limiting for voice WebSocket auth
+  const ipAuthAttempts = new Map(); // ip -> { count, resetAt }
+  const WS_AUTH_WINDOW_MS = 60000;
+  const WS_AUTH_MAX = 10;
+
   // Clean up stale DB rows from a previous crash/restart
   db.prepare('DELETE FROM freq_listeners').run();
   db.prepare('DELETE FROM voice_sessions').run();
   console.log('[voice] Cleaned stale DB sessions on startup');
 
-  const wss = new WebSocketServer({ noServer: true });
-
-  function start() {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
     wss.on('connection', (ws, req) => {
       let sessionToken = null;
+      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
 
       ws.on('message', (raw, isBinary) => {
         // Binary = audio frame
@@ -1203,9 +1212,23 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
         try { msg = JSON.parse(raw); } catch { return; }
 
         switch (msg.type) {
-          case 'auth':
+          case 'auth': {
+            // Per-IP rate limiting for auth attempts
+            const now = Date.now();
+            let entry = ipAuthAttempts.get(ip);
+            if (!entry || now > entry.resetAt) {
+              entry = { count: 0, resetAt: now + WS_AUTH_WINDOW_MS };
+              ipAuthAttempts.set(ip, entry);
+            }
+            entry.count++;
+            if (entry.count > WS_AUTH_MAX) {
+              ws.send(JSON.stringify({ type: 'auth_error', reason: 'rate_limited' }));
+              ws.close(4029, 'Too many auth attempts');
+              return;
+            }
             handleAuth(ws, msg, (token) => { sessionToken = token; });
             break;
+          }
           case 'join':
             if (sessionToken) handleJoin(sessionToken, msg);
             break;
@@ -1237,9 +1260,9 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
       });
     });
 
-    // Periodic cleanup of stale sessions (no heartbeat for > 60s)
+    // Periodic cleanup of stale sessions (no heartbeat for > 30s)
     setInterval(() => {
-      const cutoff = Date.now() - 60000;
+      const cutoff = Date.now() - 30000;
       for (const [token, session] of sessions) {
         if (session.lastSeen < cutoff) {
           console.log('[voice] Cleaning up stale session:', session.discordUserId);
@@ -1249,8 +1272,15 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
           cleanupSession(token);
         }
       }
-    }, 30000);
-  }
+    }, 10000);
+
+    // Periodic cleanup of IP auth rate limit entries
+    setInterval(() => {
+      const now = Date.now();
+      for (const [ip, entry] of ipAuthAttempts) {
+        if (now > entry.resetAt) ipAuthAttempts.delete(ip);
+      }
+    }, 60000);
 
   // --- Audio handling (binary WS frames) ---
   function handleAudio(senderToken, buf) {
@@ -1611,7 +1641,6 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
   }
 
   return {
-    start,
     wss,
     notifyTxEvent,
     kickUser,
@@ -2222,7 +2251,7 @@ write_file_backup "$SRC_DIR/ws.js" "$(cat <<'EOF'
 const WebSocket = require('ws');
 
 function createWsHub({ stateStore, tokenSecret }) {
-  const wss = new WebSocket.Server({ noServer: true });
+  const wss = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
 
   function send(ws, obj) {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -2414,8 +2443,8 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   function setDebugMode(enabled) {
     _debugMode = !!enabled;
     if (_debugMode) {
-      _enabled = false;
-      console.log('[dsgvo] Debug mode ENABLED | DSGVO compliance mode auto-disabled, retention extended to 7 days');
+      console.log('[dsgvo] Debug mode ENABLED | retention extended to 7 days. DSGVO compliance remains ' + (_enabled ? 'ENABLED' : 'DISABLED') + ' (independent setting).');
+      console.warn('[SECURITY WARNING] Debug mode is active. Data retention is extended to 7 days. DSGVO auto-cleanup will use extended retention window.');
     } else {
       console.log('[dsgvo] Debug mode DISABLED');
     }
@@ -2551,8 +2580,30 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   const app = express();
   app.use(express.json());
 
-  // Security headers
-  app.use(helmet());
+  // Security headers with strict CSP
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    permissionsPolicy: {
+      features: {
+        camera: [],
+        microphone: [],
+        geolocation: [],
+      },
+    },
+  }));
 
   // CORS policy: reject requests from browsers (desktop app sends no Origin)
   app.use(cors({
@@ -2568,6 +2619,30 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
   // Auth-specific rate limiter (stricter: 20 requests per 15 min)
   const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+
+  // Helper: revoke Discord access token with retry
+  async function revokeDiscordToken(accessToken) {
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const resp = await fetch('https://discord.com/api/v10/oauth2/token/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            token: accessToken,
+            token_type_hint: 'access_token',
+            client_id: discordClientId,
+          }),
+        });
+        if (resp.ok || resp.status === 400) return; // 400 = already revoked
+        console.warn(`[oauth] Token revoke attempt ${attempt}/${maxRetries} failed: HTTP ${resp.status}`);
+      } catch (e) {
+        console.error(`[oauth] Token revoke attempt ${attempt}/${maxRetries} error: ${e.message}`);
+      }
+      if (attempt < maxRetries) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+    console.error('[oauth] Token revocation FAILED after all retries — token may remain valid');
+  }
 
   // Trust exactly one proxy hop (Traefik) -> makes req.protocol read X-Forwarded-Proto
   // securely, ignoring forged headers from direct client connections
@@ -2596,6 +2671,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   const { signToken, verifyToken, hashUserId } = require('./crypto');
+  const crypto = require('crypto');
 
   let onTxEventFn = null;
   let _bot = bot;
@@ -2641,8 +2717,9 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   // Privacy policy text
-  app.get('/privacy-policy', (req, res) => {    const status = dsgvo ? dsgvo.getStatus() : {};
-    const oauthConfigured = !!(discordClientId && discordClientSecret && discordRedirectUri);
+  app.get('/privacy-policy', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.set('ETag', `"pp-${(policyVersion || '1.0').replace(/[^a-zA-Z0-9.]/g, '')}"`);
     res.json({
       ok: true,
       data: {
@@ -2661,6 +2738,13 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (!debugActive) {
       return res.status(410).json({ ok: false, error: 'direct_login_disabled', message: 'Direct login is disabled. Use Discord OAuth2 to log in. Enable debug mode via service.sh to re-enable.' });
     }
+    const { discordUserId, guildId } = req.body || {};
+    if (!discordUserId || !/^\d{17,20}$/.test(String(discordUserId))) {
+      return res.status(400).json({ ok: false, error: 'invalid_discord_id', message: 'discordUserId must be a valid Discord snowflake (17-20 digits).' });
+    }
+    if (!guildId || !/^\d{17,20}$/.test(String(guildId))) {
+      return res.status(400).json({ ok: false, error: 'invalid_guild_id', message: 'guildId must be a valid Discord snowflake (17-20 digits).' });
+    }
     // Hash the raw Discord ID | raw IDs are never stored
     const hashedId = hashUserId(discordUserId);
 
@@ -2673,8 +2757,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     let user = usersStore ? usersStore.get(hashedId, String(guildId)) : null;
     if (!user) {
       // Fallback: live Discord API lookup if not in cache
-      if (dsgvo && typeof dsgvo.fetchGuildMember === 'function') {
-        const fetched = await dsgvo.fetchGuildMember(String(discordUserId), String(guildId));
+      if (_bot && typeof _bot.fetchGuildMember === 'function') {
+        const fetched = await _bot.fetchGuildMember(String(discordUserId), String(guildId));
         if (fetched) {
           user = { display_name: fetched.displayName };
         }
@@ -2708,29 +2792,19 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     db.prepare('DELETE FROM auth_tokens WHERE discord_user_id = ?').run(hashedId);
     db.prepare(
       'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
-    ).run(authToken.substring(0, 64), hashedId, String(guildId), payload.name, payload.iat, payload.exp);
+    ).run(crypto.createHash('sha256').update(authToken).digest('hex'), hashedId, String(guildId), payload.name, payload.iat, payload.exp);
 
-    // Store result for companion app polling
-    pendingOAuth.set(state, {
-      token: authToken,
-      displayName: payload.name,
-      policyVersion: payload.policyVersion,
-      policyAccepted: payload.policyAccepted,
-      timestamp: Date.now(),
+    console.log('[auth/login] Debug login OK: ' + hashedId.substring(0, 12) + '... in guild ' + String(guildId));
+
+    res.json({
+      ok: true,
+      data: {
+        token: authToken,
+        displayName: payload.name,
+        policyVersion: policyVersion || '1.0',
+        policyAccepted,
+      },
     });
-    // Revoke Discord access token (we don't need it anymore)
-    try {
-      await fetch('https://discord.com/api/v10/oauth2/token/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          token: discordAccessToken,
-          token_type_hint: 'access_token',
-          client_id: discordClientId,
-        }),
-      });
-    } catch (e) { console.warn('[oauth] Token revoke failed:', e.message); }
-    console.log('[oauth] Login OK: ' + hashedId.substring(0, 12) + '... (' + displayName + ') in guild ' + matchedGuildId);
   });
 
   // Accept privacy policy
@@ -2858,7 +2932,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       db.prepare('DELETE FROM auth_tokens WHERE discord_user_id = ?').run(hashedId);
       db.prepare(
         'INSERT INTO auth_tokens (token_id, discord_user_id, guild_id, display_name, created_at_ms, expires_at_ms) VALUES (?,?,?,?,?,?)'
-      ).run(authToken.substring(0, 64), hashedId, matchedGuildId, displayName, authPayload.iat, authPayload.exp);
+      ).run(crypto.createHash('sha256').update(authToken).digest('hex'), hashedId, matchedGuildId, displayName, authPayload.iat, authPayload.exp);
 
       // Store result for companion app polling
       pendingOAuth.set(state, {
@@ -2869,17 +2943,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
         timestamp: Date.now(),
       });
       // Revoke Discord access token (we don't need it anymore)
-      try {
-        await fetch('https://discord.com/api/v10/oauth2/token/revoke', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            token: discordAccessToken,
-            token_type_hint: 'access_token',
-            client_id: discordClientId,
-          }),
-        });
-      } catch (e) { console.warn('[oauth] Token revoke failed:', e.message); }
+      revokeDiscordToken(discordAccessToken);
       console.log('[oauth] Login OK: ' + hashedId.substring(0, 12) + '... (' + displayName + ') in guild ' + matchedGuildId);
       res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>\u2713 Login Successful</h2><p>Logged in as <strong>' + displayName + '</strong></p><p style="color:#888">You can close this window and return to the companion app.</p></body></html>');
     } catch (e) {
@@ -2987,17 +3051,26 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     res.json({ ok: true, data: rows });
   });
 
-  // Frequency listener registration
+  // Frequency listener registration (requires valid auth token)
   app.post('/freq/join', (req, res) => {
-    const { discordUserId, freqId, radioSlot } = req.body || {};
-    if (!discordUserId || !freqId) {
-      return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
+    const authHeader = req.header('authorization') || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!token || !tokenSecret) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const tokenPayload = verifyToken(token, tokenSecret);
+    if (!tokenPayload) {
+      return res.status(401).json({ ok: false, error: 'invalid or expired token' });
+    }
+    const { freqId, radioSlot } = req.body || {};
+    if (!freqId) {
+      return res.status(400).json({ ok: false, error: 'missing freqId' });
     }
     const f = Number(freqId);
     if (!Number.isInteger(f) || f < 1000 || f > 9999) {
       return res.status(400).json({ ok: false, error: 'freqId must be 1000-9999' });
     }
-    const hashedUid = hashUserId(discordUserId);
+    const hashedUid = tokenPayload.uid;
     db.prepare(
       'INSERT OR REPLACE INTO freq_listeners (discord_user_id, freq_id, radio_slot, connected_at_ms) VALUES (?,?,?,?)'
     ).run(hashedUid, f, Number(radioSlot) || 0, Date.now());
@@ -3005,15 +3078,24 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     res.json({ ok: true, listener_count: row ? row.cnt : 0 });
   });
   app.post('/freq/leave', (req, res) => {
-    const { discordUserId, freqId } = req.body || {};
-    if (!discordUserId || !freqId) {
-      return res.status(400).json({ ok: false, error: 'missing discordUserId or freqId' });
+    const authHeader = req.header('authorization') || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!token || !tokenSecret) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const tokenPayload = verifyToken(token, tokenSecret);
+    if (!tokenPayload) {
+      return res.status(401).json({ ok: false, error: 'invalid or expired token' });
+    }
+    const { freqId } = req.body || {};
+    if (!freqId) {
+      return res.status(400).json({ ok: false, error: 'missing freqId' });
     }
     const f = Number(freqId);
     if (!Number.isInteger(f) || f < 1000 || f > 9999) {
       return res.status(400).json({ ok: false, error: 'freqId must be 1000-9999' });
     }
-    const hashedUid = hashUserId(discordUserId);
+    const hashedUid = tokenPayload.uid;
     db.prepare('DELETE FROM freq_listeners WHERE discord_user_id = ? AND freq_id = ?').run(hashedUid, f);
     const row = db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f);
     res.json({ ok: true, listener_count: row ? row.cnt : 0 });
@@ -3035,10 +3117,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     res.json({ ok: true, data: row });
   });
   app.post('/admin/reload', (req, res) => {
-    const token = req.header('x-admin-token') || '';
-    if (!adminToken || token !== adminToken) {
-      return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
+    if (!requireAdmin(req, res)) return;
     mapping.reload();
     res.json({ ok: true, mappingSize: mapping.size() });
   });
@@ -3048,7 +3127,14 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   // Helper: admin auth check
   function requireAdmin(req, res) {
     const token = req.header('x-admin-token') || '';
-    if (!adminToken || token !== adminToken) {
+    if (!adminToken || !token) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return false;
+    }
+    const hashedInput = crypto.createHash('sha256').update(token).digest('hex');
+    const a = Buffer.from(hashedInput, 'hex');
+    const b = Buffer.from(adminToken, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return false;
     }
@@ -3175,7 +3261,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     if (dsgvo && typeof dsgvo.unbanUser === 'function') {
       const hashedId = hashUserId(String(discordUserId));
       const removed = dsgvo.unbanUser(hashedId);
-      console.log(`[admin] Banned user ${hashedId.substring(0, 12)}... → ${kicked} session(s) kicked`);
+      console.log(`[admin] Unbanned user ${hashedId.substring(0, 12)}... → ${removed} entry removed`);
       res.json({ ok: true, data: { removed } });
     } else {
       res.status(500).json({ ok: false, error: 'dsgvo module not available' });

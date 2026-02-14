@@ -83,7 +83,7 @@ public sealed class AudioDuckingService : IDisposable
             try
             {
                 using var enumerator = new MMDeviceEnumerator();
-                var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
                 var sessionManager = device.AudioSessionManager;
                 var sessions = sessionManager.Sessions;
                 int duckedCount = 0;
@@ -149,7 +149,7 @@ public sealed class AudioDuckingService : IDisposable
             try
             {
                 using var enumerator = new MMDeviceEnumerator();
-                var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
                 var sessionManager = device.AudioSessionManager;
                 var sessions = sessionManager.Sessions;
 
@@ -197,7 +197,7 @@ public sealed class AudioDuckingService : IDisposable
         try
         {
             using var enumerator = new MMDeviceEnumerator();
-            var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
             var sessionManager = device.AudioSessionManager;
             var sessions = sessionManager.Sessions;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

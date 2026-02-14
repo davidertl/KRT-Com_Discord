@@ -67,53 +67,104 @@ public class BeepService : IDisposable
     }
 
     /// <summary>
-    /// Double-beep for Talk to All start
+    /// Double-beep for Talk to All start.
+    /// Uses PlayToneSequence to prevent tone truncation.
     /// </summary>
-    public async void PlayTalkToAllBeep(float radioVolume = 1f, float radioPan = 0.5f)
+    public void PlayTalkToAllBeep(float radioVolume = 1f, float radioPan = 0.5f)
     {
         if (!_enabled) return;
-        PlayBeep(TxStartFreq, 60, 0.3f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(80);
-        PlayBeep(TxStartFreq, 60, 0.3f, radioVolume, radioPan);
+        PlayToneSequence(new[] {
+            (TxStartFreq, 60, 0.3f, 80),
+            (TxStartFreq, 60, 0.3f, 0),
+        }, radioVolume, radioPan);
     }
 
     /// <summary>
-    /// Emergency TX start - urgent ascending siren (3 tones, louder)
+    /// Emergency TX start - urgent ascending siren (3 tones, louder).
+    /// Uses PlayToneSequence to prevent tone truncation.
     /// </summary>
-    public async void PlayEmergencyTxBeep(float radioVolume = 1f, float radioPan = 0.5f)
+    public void PlayEmergencyTxBeep(float radioVolume = 1f, float radioPan = 0.5f)
     {
         if (!_enabled) return;
-        PlayBeep(1200, 80, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(1500, 80, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(1800, 120, 0.6f, radioVolume, radioPan);
+        PlayToneSequence(new[] {
+            (1200, 80, 0.55f, 40),
+            (1500, 80, 0.55f, 40),
+            (1800, 120, 0.6f, 0),
+        }, radioVolume, radioPan);
     }
 
     /// <summary>
-    /// Emergency TX end - descending three-tone
+    /// Emergency TX end - descending three-tone.
+    /// Uses PlayToneSequence to prevent tone truncation.
     /// </summary>
-    public async void PlayEmergencyTxEndBeep(float radioVolume = 1f, float radioPan = 0.5f)
+    public void PlayEmergencyTxEndBeep(float radioVolume = 1f, float radioPan = 0.5f)
     {
         if (!_enabled) return;
-        PlayBeep(1500, 80, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(1200, 80, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(40);
-        PlayBeep(900, 120, 0.55f, radioVolume, radioPan);
+        PlayToneSequence(new[] {
+            (1500, 80, 0.55f, 40),
+            (1200, 80, 0.55f, 40),
+            (900, 120, 0.55f, 0),
+        }, radioVolume, radioPan);
     }
 
     /// <summary>
-    /// Emergency RX start - rapid triple-pulse alert (louder, higher pitch)
+    /// Emergency RX start - rapid triple-pulse alert (louder, higher pitch).
+    /// Uses PlayToneSequence to prevent tone truncation.
     /// </summary>
-    public async void PlayEmergencyRxBeep(float radioVolume = 1f, float radioPan = 0.5f)
+    public void PlayEmergencyRxBeep(float radioVolume = 1f, float radioPan = 0.5f)
     {
         if (!_enabled) return;
-        PlayBeep(1600, 60, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(30);
-        PlayBeep(1600, 60, 0.55f, radioVolume, radioPan);
-        await System.Threading.Tasks.Task.Delay(30);
-        PlayBeep(1800, 80, 0.6f, radioVolume, radioPan);
+        PlayToneSequence(new[] {
+            (1600, 60, 0.55f, 30),
+            (1600, 60, 0.55f, 30),
+            (1800, 80, 0.6f, 0),
+        }, radioVolume, radioPan);
+    }
+
+    /// <summary>
+    /// Play a sequence of tones as a single audio buffer.
+    /// Prevents tone truncation that occurs when calling PlayBeep
+    /// multiple times with async delays (each PlayBeep kills the previous).
+    /// Each entry: (frequencyHz, durationMs, volumeMultiplier, gapAfterMs).
+    /// </summary>
+    private void PlayToneSequence((int freq, int durationMs, float vol, int gapMs)[] tones,
+                                  float radioVolume, float radioPan)
+    {
+        try
+        {
+            var sampleRate = 44100;
+            var allSamples = new System.Collections.Generic.List<float>();
+
+            for (int t = 0; t < tones.Length; t++)
+            {
+                var (freq, durationMs, vol, gapMs) = tones[t];
+                var sampleCount = sampleRate * durationMs / 1000;
+
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    var time = (double)i / sampleRate;
+                    var envelope = 1.0;
+                    if (i < sampleCount * 0.1)
+                        envelope = i / (sampleCount * 0.1);
+                    else if (i > sampleCount * 0.8)
+                        envelope = (sampleCount - i) / (sampleCount * 0.2);
+
+                    allSamples.Add((float)(Math.Sin(2 * Math.PI * freq * time) * vol * envelope));
+                }
+
+                // Silence gap after each tone (except the last)
+                if (t < tones.Length - 1 && gapMs > 0)
+                {
+                    allSamples.AddRange(new float[sampleRate * gapMs / 1000]);
+                }
+            }
+
+            PlaySamples(allSamples.ToArray(), sampleRate, radioVolume, radioPan);
+        }
+        catch
+        {
+            // Ignore tone sequence errors — not critical
+        }
     }
 
     /// <summary>
@@ -225,8 +276,10 @@ public class BeepService : IDisposable
         }
 
         var waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 2); // stereo
+        var byteBuffer = new byte[stereoSamples.Length * sizeof(float)];
+        Buffer.BlockCopy(stereoSamples, 0, byteBuffer, 0, byteBuffer.Length);
         var provider = new RawSourceWaveStream(
-            new System.IO.MemoryStream(stereoSamples.SelectMany(BitConverter.GetBytes).ToArray()),
+            new System.IO.MemoryStream(byteBuffer),
             waveFormat);
 
         var volumeProvider = new VolumeSampleProvider(provider.ToSampleProvider())
@@ -240,7 +293,7 @@ public class BeepService : IDisposable
         {
             try
             {
-                var enumerator = new MMDeviceEnumerator();
+                using var enumerator = new MMDeviceEnumerator();
                 device = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
                     .FirstOrDefault(d => d.FriendlyName == _outputDeviceName);
             }

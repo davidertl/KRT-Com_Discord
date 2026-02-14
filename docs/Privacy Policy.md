@@ -32,7 +32,7 @@ After reading and accepting the terms and privacy policy, the user can choose to
 
 ### 2.1 User Identifiers
 
-- **Discord OAuth2**: When logging in, the server requests Discord `identify` and `guilds` scopes via OAuth2 authorization code flow. This provides the user's Discord ID, display name, and guild memberships. The Discord access token is **immediately revoked** after use — the server does not retain long-term access to the user's Discord account.
+- **Discord OAuth2**: When logging in, the server requests Discord `identify` and `guilds` scopes via OAuth2 authorization code flow. This provides the user's Discord ID, display name, and guild memberships. The Discord access token is **immediately revoked** after use (with up to 3 retry attempts) — the server does not retain long-term access to the user's Discord account.
 - **User ID Hashing**: Raw Discord User IDs (snowflake IDs) are **never stored** in the database. All user identifiers are hashed using HMAC-SHA256 before persistence. This means that even if the database were compromised, the stored hashes cannot be reversed to obtain the original Discord User IDs without access to the server's secret key.
 - Discord display names (server nicknames only, changeable by user) are stored for display purposes but are not used for authentication. Old usernames are not stored — only the latest nickname is kept.
 - Guild IDs are stored for frequency mapping and access control. They are used to determine if a user is allowed to connect to the voice server and to which frequencies they have access.
@@ -44,6 +44,7 @@ After reading and accepting the terms and privacy policy, the user can choose to
 ### 2.2 Authentication & Sessions
 
 - Temporary HMAC-SHA256 signed authentication tokens (24h expiry)
+- Token IDs stored as **SHA-256 hashes** of the signed token (the full token is never stored in the database)
 - Active voice sessions
 - Expiration timestamps
 
@@ -87,6 +88,8 @@ There is **no technical capability** to reconstruct past conversations.
 ### 2.5 Admin Token
 
 - The admin token is used exclusively for server management endpoints
+- The server **SHA-256 hashes** the admin token at startup — the plaintext admin token is not kept in memory after initialization
+- All admin token comparisons use **timing-safe** comparison to prevent timing side-channel attacks
 - The companion app does **not persist** the admin token to disk — it exists only in memory during runtime
 - The admin token input field is only visible in the companion app when the server is in debug mode
 
@@ -143,7 +146,7 @@ Unbanning a user **does not restore deleted data**.
 - When debug mode is active:
   - The companion app displays a visible warning to all users
   - The manual login endpoint (POST /auth/login) becomes available
-  - DSGVO compliance mode is automatically disabled
+  - DSGVO compliance mode remains an **independent setting** and is not affected by debug mode
   - Data retention extends to 7 days instead of 2 days
 - Debug logs are **not persistent** — they are deleted after the configured period and are deleted immediately when debug mode is turned off.
 - The server administrator is warned in the CLI when debug mode or debug tools are active.
@@ -155,7 +158,7 @@ Unbanning a user **does not restore deleted data**.
 No data is shared with third parties.
 
 This project:
-- Communicates with Discord API only for: OAuth2 login (authorization code exchange, immediately revoked), bot guild member verification, and channel name synchronization
+- Communicates with Discord API only for: OAuth2 login (authorization code exchange, immediately revoked with retry), bot guild member verification, and channel name synchronization
 - Does not collect usage statistics, except for debug logs when debug mode is enabled
 - Does not integrate cloud-based tracking services
 
@@ -167,7 +170,7 @@ The server operator is responsible for:
 - Log retention configuration
 - Compliance with applicable local data protection laws
 - Secure infrastructure operation
-- TLS/HTTPS configuration for encrypted transport
+- TLS/HTTPS configuration for encrypted transport (the companion app defaults to TLS for non-localhost connections)
 
 This software provides **technical tools for privacy control** but does not enforce legal decisions.
 

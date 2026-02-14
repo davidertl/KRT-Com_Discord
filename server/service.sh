@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.9
+##version alpha-0.0.10
 ## Service management & tools for das-krt Backend
 ## Usage: bash service.sh [start|stop|restart|status|logs|menu]
 
@@ -22,7 +22,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.9"
+VERSION="Alpha 0.0.10"
 SERVICE_NAME="das-krt-backend"
 
 # --------------------------------------------------
@@ -30,12 +30,16 @@ SERVICE_NAME="das-krt-backend"
 # --------------------------------------------------
 json_escape() {
   local str="$1"
-  # Escape backslashes, double quotes, and control characters
+  # Escape backslashes, double quotes, and control characters (RFC 8259)
   str="${str//\\/\\\\}"
   str="${str//\"/\\\"}"
   str="${str//$'\n'/\\n}"
   str="${str//$'\r'/\\r}"
   str="${str//$'\t'/\\t}"
+  str="${str//$'\b'/\\b}"
+  str="${str//$'\f'/\\f}"
+  # Remove null bytes and other ASCII control characters (0x00-0x1F except already handled)
+  str="$(printf '%s' "$str" | tr -d '\000-\007\013\016-\037')"
   printf '%s' "$str"
 }
 

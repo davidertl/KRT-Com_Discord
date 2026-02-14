@@ -32,7 +32,7 @@ public sealed class AudioCaptureService : IDisposable
         {
             try
             {
-                var enumerator = new MMDeviceEnumerator();
+                using var enumerator = new MMDeviceEnumerator();
                 device = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
                     .FirstOrDefault(d => d.FriendlyName == _deviceName);
             }

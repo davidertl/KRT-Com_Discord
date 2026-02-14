@@ -1,8 +1,9 @@
-# High priority:
+
+## High priority:
 
   
-# Medium priority: 
-# Low priority:
+## Medium priority: 
+## Low priority:
 
 
 # General wishlist (quasi meine Notizen damit ich nix vergesse):
@@ -20,6 +21,9 @@ optional add the checkmark to this setting to add the keybind for the radio.
 -add a webSocket API for controlling the radio from external applications (e.g., Stream Deck, custom scripts). This API would allow users to send commands to the radio system, such as changing frequencies, toggling push-to-talk, adjusting volume levels, or applying specific profiles. By providing a standardized interface for external control, users could integrate the radio system with various tools and platforms, enhancing its versatility and usability. The API could be secured with authentication tokens to ensure that only authorized applications can control the radio, and it could support both RESTful endpoints for simple commands and WebSocket connections for real-time updates and interactions.
 -profiles for channel settings: allowing users to create and save profiles for different channel configurations (e.g., specific frequencies, volume levels, ducking settings) that can be quickly applied based on their current activity or preferences. This would enable users to easily switch between different setups for various scenarios, such as gaming sessions, streaming, or casual communication. The profiles could be managed through the companion app, with options to create, edit, and delete profiles as needed. This feature would enhance the flexibility and usability of the radio system, allowing users to tailor their experience to their specific needs and preferences.
 
+# Error tracking: 
+
+
 # Security Audit and debugging:
 check security autit notes and check which ones are already fixed, for the one thar are fixed mark them as fixed.
 
@@ -27,33 +31,65 @@ check security autit notes and check which ones are already fixed, for the one t
 
 ### 🔴 Critical
 
-- [ ] **Missing `discordUserId` destructuring in `/auth/login`**: The variable `discordUserId` is referenced but never destructured from `req.body` in the handler. This causes a `ReferenceError` at runtime (in debug mode), potentially leaking stack trace information. Add proper destructuring and validate that it is a non-empty string matching Discord snowflake format.
+- [x] **Missing `discordUserId` destructuring in `/auth/login`**: Fixed — added `const { discordUserId, guildId } = req.body || {};` with Discord snowflake regex validation (17-20 digits) before any usage.
 
 ### 🟠 High
 
 - [x] **SQL injection pattern (template literal table names)**: `deleteUser` now uses parameterized queries exclusively. `migrateUserIdHashing` still uses `${table}` interpolation but the `tables` array is hardcoded and never user-controlled. Accepted risk — no user input reaches table name interpolation.
-- [ ] **Undefined variable `kicked` in `/admin/unban`**: The handler logs `${kicked}` but only defines `removed`. This causes a `ReferenceError` at runtime, crashing the request and potentially leaking stack trace info. Replace with `removed`.
-- [ ] **Admin token plaintext storage & non-timing-safe comparison**: `ADMIN_TOKEN` is stored in plaintext in `.env` and `config.json`, transmitted via `x-admin-token` header, and compared with `!==` (not timing-safe). Use `crypto.timingSafeEqual()` for comparison. store the item hashed.
-- [ ] **No CSRF protection on admin POST endpoints**: All admin state-changing endpoints (`/admin/ban`, `/admin/unban`, `/admin/dsgvo/delete-user`, `/admin/dsgvo/debug`, etc.) rely solely on the `x-admin-token` header. If an attacker discovers the token, there is no secondary CSRF mechanism (no nonce, no session binding).
+- [x] **Undefined variable `kicked` in `/admin/unban`**: Fixed — replaced `${kicked}` with `${removed}` in the log message.
+- [x] **Admin token plaintext storage & non-timing-safe comparison**: Fixed — admin token is now SHA-256 hashed at startup (`crypto.createHash('sha256')`). All comparisons use `crypto.timingSafeEqual()` on hashed buffers. The `/admin/reload` inline check was also replaced with `requireAdmin()`.
+- [x] **No CSRF protection on admin POST endpoints**: Mitigated — admin token is now hashed and compared timing-safely. Combined with CORS rejection of browser-origin requests, the attack surface is minimal. True CSRF via browser is blocked by the `cors()` middleware that rejects all requests with an `Origin` header.
 - [x] **OAuth2 `state` parameter no expiry cleanup visible**: Fixed — `setInterval` every 5 minutes sweeps `pendingOAuth` and `pendingOAuthTimestamps` maps, deleting entries older than 5 minutes. Both pending (null) and completed states are cleaned up.
 
 ### 🟡 Medium
 
-- [ ] **Auth token ID truncated to 64 chars (collision risk)**: `token_id` in the DB uses `authToken.substring(0, 64)`. Different tokens sharing the same 64-char prefix would overwrite each other. Store the full hash or use a separate UUID as the DB key.
-- [ ] **No rate limiting on voice WebSocket authentication**: The voice relay WebSocket accepts `auth` messages without rate limiting. An attacker could open many connections and brute-force session tokens. Add per-IP connection rate limiting on the upgrade handler.
-- [ ] **No warning when `BIND_HOST` is not `127.0.0.1`**: If an operator changes `BIND_HOST` to `0.0.0.0` in `.env`, the backend is directly exposed without TLS (Traefik bypassed). Add a startup warning log when `BIND_HOST` is not loopback.
+- [x] **Auth token ID truncated to 64 chars (collision risk)**: Fixed — `token_id` now stores the full SHA-256 hash of the auth token (`crypto.createHash('sha256').update(authToken).digest('hex')`), eliminating any collision risk.
+- [x] **No rate limiting on voice WebSocket authentication**: Fixed — added per-IP rate limiting (10 auth attempts per 60s window) in the voice WebSocket `auth` message handler. Excess attempts receive `auth_error` with `rate_limited` reason and the connection is closed.
+- [x] **No warning when `BIND_HOST` is not `127.0.0.1`**: Fixed — startup now logs a `[SECURITY WARNING]` when `BIND_HOST` is not `127.0.0.1`, `localhost`, or `::1`.
 - [x] **Companion app config encryption strength unknown**: Verified — `ConfigService.cs` uses Windows DPAPI (`ProtectedData.Protect`/`Unprotect` with `DataProtectionScope.CurrentUser`). Keys are machine- and user-bound, not hardcoded. Auth tokens are stored with `DPAPI:` prefix and decrypted on load.
-- [ ] **90-second ghost session window**: Stale session cleanup uses a 60s timeout with 30s intervals, meaning a disconnected client could remain "active" and receive audio for up to 90 seconds. Reduce the cleanup interval or timeout, and verify `freq_listeners` DB entries are also cleaned up.
-- [ ] **Incomplete JSON escaping in `service.sh`**: The `json_escape` function only handles `\`, `"`, `\n`, `\r`, `\t`. Other control characters (`\b`, `\f`, null bytes, Unicode control chars) are not escaped. A malicious input could cause JSON parsing issues or injection in the backend.
-- [ ] **Discord access token revocation failure silently swallowed**: If the `fetch` to Discord's `/oauth2/token/revoke` fails, only a `console.warn` is emitted. The token remains valid despite the privacy policy claiming immediate revocation. Add retry logic or at minimum log at error level.
+- [x] **90-second ghost session window**: Fixed — reduced stale session timeout from 60s to 30s and cleanup interval from 30s to 10s. Maximum ghost window is now 40s.
+- [x] **Incomplete JSON escaping in `service.sh`**: Fixed — `json_escape()` now also handles `\b`, `\f`, and strips null bytes and remaining ASCII control characters (0x00-0x1F) via `tr`.
+- [x] **Discord access token revocation failure silently swallowed**: Fixed — replaced inline try/catch with `revokeDiscordToken()` helper that retries up to 3 times with exponential backoff (1s, 2s, 3s). Logs at `error` level after all retries fail.
 
 ### 🟢 Low
 
-- [ ] **No cache headers on `/privacy-policy`**: The endpoint doesn't set `Cache-Control` or `ETag` headers. Clients can't detect policy changes efficiently. Add appropriate cache headers.
-- [ ] **No input validation in `fix_encoding.py`**: `sys.argv[1]` is used directly as a file path without validation. A crafted path could read/write arbitrary files. Add path validation (dev tool, low risk).
-- [ ] **Debug mode couples DSGVO disable**: Enabling debug mode automatically disables DSGVO compliance and extends data retention to 7 days. An operator might inadvertently violate GDPR. Decouple debug logging from DSGVO settings.
-- [ ] **No WebSocket message size limits**: Voice relay `ws.on('message')` parses JSON without checking message size. An attacker could send very large payloads to consume memory. Add `maxPayload` option to the WebSo  cket server.
-- [ ] **Helmet uses defaults (no strict CSP)**: `app.use(helmet())` uses default configuration without a strict `Content-Security-Policy` or `Permissions-Policy`. The OAuth success redirect page would benefit from a strict CSP. Configure helmet with explicit CSP rules.
+- [x] **No cache headers on `/privacy-policy`**: Fixed — endpoint now sets `Cache-Control: public, max-age=3600` and an `ETag` header derived from the policy version.
+- [x] **No input validation in `fix_encoding.py`**: N/A — file does not exist in the repository. Removed from audit.
+- [x] **Debug mode couples DSGVO disable**: Fixed — `setDebugMode()` no longer auto-disables `_enabled`. Debug mode only extends retention to 7 days but DSGVO compliance mode remains an independent setting. Added security warning log.
+- [x] **No WebSocket message size limits**: Fixed — both voice relay and WS hub now set `maxPayload` (64 KB for voice, 16 KB for state hub) on `WebSocketServer` creation.
+- [x] **Helmet uses defaults (no strict CSP)**: Fixed — `helmet()` now configured with explicit `contentSecurityPolicy` directives (`default-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`, etc.) and `permissionsPolicy` (camera/microphone/geolocation denied).
+
+## Companion App Security Audit (Alpha 0.0.9)
+
+### 🔴 Critical
+
+- [x] **WebSocket defaults to unencrypted `ws://`**: Fixed — `VoiceService.ConnectAsync` now defaults to `wss://` (encrypted). Only explicit `http://` prefix or localhost (`127.0.0.1`, `localhost`, `::1`) uses `ws://`.
+- [x] **HTTP backend defaults to plaintext**: Fixed — `BuildBaseUrl()` now defaults to `https://`. Only explicit `http://` prefix or localhost uses `http://`.
+- [x] **Admin token sent over unencrypted HTTP**: Mitigated by the TLS default fixes above. Admin tokens are only sent over HTTPS unless explicitly connecting to localhost.
+
+### 🟠 High
+
+- [x] **DPAPI null entropy — any same-user app can decrypt**: Fixed — `ProtectString`/`UnprotectString` now use application-specific entropy `"KRT-Com_Discord_v1_entropy"`. Backward-compatible: falls back to null entropy for configs encrypted before this update.
+- [x] **Legacy plaintext tokens not auto-upgraded**: Fixed — legacy tokens are returned as-is on load but will be DPAPI-encrypted on next `Save()` call (which happens on any settings change or auto-connect).
+- [x] **Encryption keys not zeroed from memory**: Fixed — `RemoveFreqKey` and `ClearAllKeys` now call `CryptographicOperations.ZeroMemory()` on key bytes before removal.
+- [x] **Silent plaintext audio fallback**: Fixed — `VoiceService` now emits a status warning "⚠ Transmitting without encryption" when no key is available for a frequency.
+
+### 🟡 Medium
+
+- [x] **Thread-unsafe `HashSet<int>` for active frequencies**: Fixed — replaced with `ConcurrentDictionary<int, byte>` for thread-safe access across async calls.
+- [x] **Unvalidated URL opened via `Process.Start`**: Fixed — OAuth URL is now validated with `Uri.TryCreate` to ensure only `http://` or `https://` schemes before opening.
+- [x] **Sensitive bytes not zeroed after DPAPI encrypt/decrypt**: Fixed — `CryptographicOperations.ZeroMemory()` called on plaintext byte arrays after `ProtectedData.Protect` and on decrypted byte arrays after `ProtectedData.Unprotect`.
+- [ ] **No TLS certificate pinning**: Both `ClientWebSocket` and `HttpClient` use default certificate validation. No certificate pinning implemented. Accepted risk — certificate pinning complicates self-hosted deployments.
+- [ ] **Config file stored with default filesystem permissions**: `File.WriteAllText` creates config with default ACLs. Low risk — DPAPI-encrypted tokens cannot be decrypted by other user accounts.
+- [ ] **Global keyboard hook captures all keystrokes**: Inherent to `WH_KEYBOARD_LL` for global hotkey functionality. `RegisterHotKey` API cannot detect key-up events needed for PTT. Accepted risk.
+- [ ] **Debug log may contain sensitive data**: Log output could include server error responses. Accepted risk — debug logging is user-opt-in and file is in user's AppData.
+
+### 🟢 Low
+
+- [x] **`async void` in ReconnectManager**: Fixed — `ScheduleNextAttempt` now wraps core logic in try-catch to prevent unhandled exceptions from crashing the process.
+- [ ] **Auth tokens stored as immutable `string` fields**: Cannot be reliably cleared from managed memory. Accepted risk — .NET `SecureString` is deprecated and provides limited benefit on .NET Core.
+- [ ] **No audio replay protection**: Accepted risk — sequence deduplication within 20ms window provides basic protection. Full replay protection would require per-session sequence tracking.
+- [ ] **Weak broadcast dedup hash**: Samples every 4th byte for performance. Accepted risk — collisions would only cause occasional frame drops, not a security vulnerability.
 
 
 # Changelog
@@ -125,4 +161,51 @@ check security autit notes and check which ones are already fixed, for the one t
 - [x] **Broadcast dedup compatibility**: Broadcast deduplication now operates on decrypted Opus bytes so that identical broadcasts on multiple frequencies are still correctly deduplicated despite different per-frequency ciphertexts.
 - [x] **Backward compatibility**: If no `freqKey` is provided by the server (older server version), the client falls back to plaintext audio transmission seamlessly.
 
+## Connection Point Audit (Alpha 0.0.10)
+
+All 11 client–server connection points were audited for protocol compatibility and security after the 0.0.9 security hardening changes.
+
+- [x] **Authentication handshake**: `auth` → `auth_ok` field names and payload format match between VoiceService and server `handleAuth`.
+- [x] **Token verification**: Client sends full signed token; server verifies via `verifyToken()`. `token_id` (SHA-256 hash) is DB-only — client never references it.
+- [x] **Join/Leave protocol**: `join`/`leave`/`mute`/`unmute` message fields and `join_ok` response (including `freqKey`) match on both sides.
+- [x] **Audio frame format**: Binary format `[freqId:4][seq:4][payload]` is consistent between client TX, server relay, and client RX. Server relays raw buffer unchanged.
+- [x] **Admin token flow**: Server SHA-256 hashes admin token at startup; `requireAdmin()` hashes the incoming raw `x-admin-token` header and uses `timingSafeEqual`. Compatible.
+- [x] **TLS scheme handling**: Client defaults to `wss://`/`https://` for non-localhost, `ws://`/`http://` for localhost. Compatible with Traefik reverse proxy setup.
+- [x] **OAuth flow**: `BuildBaseUrl()` → `/auth/discord/redirect` → Discord → `/auth/discord/callback` → `pendingOAuth` → `/auth/discord/poll`. Client polling matches server response format.
+- [x] **DPAPI backward compatibility**: `UnprotectString` tries app-specific entropy first, falls back to null entropy for old configs. Corrupted tokens return empty string (forces re-auth).
+- [x] **Encryption key exchange**: Server sends 32-byte key as base64 in `join_ok`; client `SetFreqKey` decodes and validates length. Format matches.
+- [x] **Rate limiting vs. reconnect**: ReconnectManager's exponential backoff produces max ~6 attempts in 60s (limit: 10). No collision under normal use.
+- [x] **Helmet CSP vs. inline styles**: `'unsafe-inline'` in `styleSrc` permits OAuth success page inline styles. No CSP violation.
+- [x] **`/auth/login` debug endpoint fix**: Removed orphaned OAuth callback code (`pendingOAuth.set(state, ...)`, `revokeDiscordToken(discordAccessToken)`, undefined `displayName`/`matchedGuildId`) that would crash with `ReferenceError`. Replaced with direct `res.json()` response matching `BackendClient.LoginAsync()` expected format.
+
 ## Open
+
+## Fixed (Alpha 0.0.10 — Code Audit & Bug Fixes)
+
+Full code audit across all 25 source files. 14 bugs found (3 critical, 3 high, 4 medium, 4 low). 12 fixed, 2 tracked as accepted risk.
+
+### 🔴 Critical
+
+- [x] **ConfigService.Save() drops 19 properties**: The manual `CompanionConfig` copy in `Save()` omitted `LoggedInDisplayName`, all 4 sound toggles, all 8 overlay settings, and all 5 ducking settings. Every save silently reset these to defaults. Fixed — all properties now included in the copy.
+- [x] **voice.js extra closing brace**: An orphan `}` at the end of the WSS setup block prematurely closed `createVoiceRelay`. All handler functions (`handleAudio`, `handleAuth`, `handleJoin`, etc.) ended up at module scope with no access to closure variables. Server would crash with `SyntaxError` or `ReferenceError` on startup. Fixed — removed the extra `}`. Also removed undefined `start` property from the return object.
+- [x] **http.js missing `crypto` import**: `http.js` used `crypto.createHash()` and `crypto.timingSafeEqual()` (in `/auth/login`, OAuth callback, `requireAdmin`) without importing Node's `crypto` module. Would crash with `TypeError` since `globalThis.crypto` (Web Crypto API) doesn't have `createHash`. Fixed — added `const crypto = require('crypto');` inside `createHttpServer`.
+
+### 🟠 High
+
+- [x] **BeepService `async void` methods crash risk**: 4 multi-tone methods (`PlayTalkToAllBeep`, `PlayEmergencyTxBeep`, `PlayEmergencyTxEndBeep`, `PlayEmergencyRxBeep`) were `async void`. Unhandled exceptions (e.g., audio device unplugged) would crash the entire application. Fixed — replaced with synchronous `PlayToneSequence` helper that builds a combined sample buffer, eliminating async entirely.
+- [x] **BeepService tone truncation**: Multi-tone sequences called `PlayBeep` with short async delays between tones. Each `PlayBeep` stopped and disposed the previous `WasapiOut`, cutting off the prior tone mid-playback. Only the last tone in each sequence played fully. Fixed — `PlayToneSequence` generates all tones (with silence gaps) into a single audio buffer and calls `PlaySamples` once.
+- [x] **`/auth/login` uses wrong object for guild member lookup**: The Discord bot guild member fallback checked `dsgvo.fetchGuildMember` instead of `_bot.fetchGuildMember`. The guard always evaluated to `false`, so users not in local cache always got "user not found" during debug login. Fixed — changed to `_bot`.
+
+### 🟡 Medium
+
+- [x] **MMDevice COM leak in AudioDuckingService**: `enumerator.GetDefaultAudioEndpoint()` returns an `MMDevice` that was never disposed. Three call sites (`ApplyDucking`, `RestoreDucking`, `GetAudioSessions`) leaked a COM reference on every invocation. Fixed — added `using` to all three.
+- [x] **Unauthenticated `/freq/join` and `/freq/leave`**: REST endpoints accepted any `discordUserId` in the body with no authentication. Anyone could forge join/leave requests. Fixed — both endpoints now require a valid Bearer token; user ID is derived from the token payload instead of the request body.
+- [ ] **Shared `OpusDecoder` across frequencies**: A single decoder instance handles audio from all frequency channels. Opus decoders maintain internal prediction state; interleaving frames from different senders can cause brief audio artifacts (clicks/distortion). Accepted risk — per-frequency decoders planned for a future update.
+- [ ] **`ConvertToMono48k` hardcodes `bytesPerSample = 4`**: Assumes IEEE float format. If a WASAPI device delivers 16-bit PCM (rare in shared mode), produces garbage audio. Accepted risk — WASAPI shared mode always uses float format in practice.
+
+### 🟢 Low
+
+- [x] **MMDeviceEnumerator leak in AudioCaptureService**: `new MMDeviceEnumerator()` was never disposed when searching for a specific input device. Fixed — added `using`.
+- [x] **MMDeviceEnumerator leak in BeepService.PlaySamples**: Same issue in the output device lookup. Fixed — added `using`.
+- [x] **BeepService SelectMany allocation**: `stereoSamples.SelectMany(BitConverter.GetBytes).ToArray()` allocated a new `byte[4]` for every float sample (~22,000 allocations per beep). Fixed — replaced with `Buffer.BlockCopy` for zero-allocation conversion.
+- [ ] **Dead code `start` in voice.js return**: The `createVoiceRelay` return object included `start` but no such function was defined. Fixed as part of the voice.js extra brace fix (property removed).

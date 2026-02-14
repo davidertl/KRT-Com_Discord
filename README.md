@@ -2,7 +2,7 @@
 
 KRT-Com ist eine funkähnliche Kommunikationslösung für Discord, angelehnt an klassische TeamSpeak-Funkplugins. User kommunizieren parallel auf mehreren Frequenzen, ohne den Voice-Channel zu wechseln – mit realistischer Half-Duplex-Funklogik statt klassischem Voice-Chat.
 
-**Status:** Alpha 0.0.9  
+**Status:** Alpha 0.0.10  
 
 Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr verfügbar. Da das Plugin mit Teamspeak wirklich fantastisch funktioniert hat, wollte ich eine ähnliche Lösung für Discord schaffen. Das Projekt ist komplett Open Source und wird von mir in meiner Freizeit entwickelt. Es ist kostenlos, frei verfügbar und soll es auch bleiben.
 
@@ -245,6 +245,21 @@ SQLite (WAL Mode) mit folgendem Schema:
 ---
 
 ## Changelog
+
+### Alpha 0.0.10
+
+**Bug Fixes & Code Audit:**
+- **ConfigService.Save() Datenverlust behoben**: 19 Properties (Sound-Toggles, Overlay, Ducking) wurden bei jedem Speichern auf Standardwerte zurückgesetzt.
+- **Server voice.js Syntax-Fehler behoben**: Überzählige `}` hat `createVoiceRelay` vorzeitig geschlossen — Server konnte nicht starten.
+- **Server http.js fehlender `crypto` Import**: `crypto.createHash()` und `timingSafeEqual()` hätten bei Auth/Admin-Endpunkten crashes verursacht.
+- **BeepService Tonabbruch behoben**: Multi-Ton-Sequenzen (Emergency/TalkToAll) haben vorherige Töne abgeschnitten. Jetzt als einzelner Audio-Buffer generiert.
+- **BeepService `async void` crash-Risiko behoben**: Unbehandelte Exceptions in Beep-Methoden konnten die App zum Absturz bringen.
+- **Debug Login Guild-Lookup repariert**: `/auth/login` hat `dsgvo.fetchGuildMember` statt `_bot.fetchGuildMember` verwendet.
+- **COM/Ressourcen-Lecks behoben**: `MMDevice` und `MMDeviceEnumerator` in AudioDuckingService, AudioCaptureService, BeepService werden jetzt korrekt disposed.
+- **`/freq/join` und `/freq/leave` authentifiziert**: REST-Endpunkte erfordern jetzt einen gültigen Bearer-Token.
+- **BeepService Speicher-Performance**: `SelectMany(BitConverter.GetBytes)` durch `Buffer.BlockCopy` ersetzt.
+
+---
 
 ### Alpha 0.0.9
 

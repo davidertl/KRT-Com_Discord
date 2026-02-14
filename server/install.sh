@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-##version alpha-0.0.8
+##version alpha-0.0.9
 set -e
 
 # Wenn versehentlich mit sh/dash gestartet wurde, in bash neu starten
@@ -21,7 +21,7 @@ log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_input() { echo -e "${CYAN}$*${NC}"; }
 
-VERSION="Alpha 0.0.8"
+VERSION="Alpha 0.0.9"
 echo -e "${GREEN}=== das-krt Install | ${VERSION} ===${NC}"
 
 # --------------------------------------------------
@@ -1175,6 +1175,10 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
   // Frequency subscriptions: freqId -> Set<sessionToken>
   const freqSubscribers = new Map();
 
+  // Per-frequency AES-256 encryption keys (E2E audio encryption)
+  // freqId -> Buffer (32 bytes). Generated on first join, deleted when last subscriber leaves.
+  const freqKeys = new Map();
+
   // Clean up stale DB rows from a previous crash/restart
   db.prepare('DELETE FROM freq_listeners').run();
   db.prepare('DELETE FROM voice_sessions').run();
@@ -1381,6 +1385,13 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     if (!freqSubscribers.has(freqId)) freqSubscribers.set(freqId, new Set());
     freqSubscribers.get(freqId).add(sessionToken);
 
+    // Generate per-frequency E2E encryption key if this is the first subscriber
+    if (!freqKeys.has(freqId)) {
+      freqKeys.set(freqId, crypto.randomBytes(32));
+      console.log('[voice] Generated E2E key for freq', freqId);
+    }
+    const freqKeyB64 = freqKeys.get(freqId).toString('base64');
+
     // Persist to freq_listeners DB
     db.prepare(
       'INSERT OR REPLACE INTO freq_listeners (discord_user_id, freq_id, radio_slot, connected_at_ms) VALUES (?,?,?,?)'
@@ -1394,6 +1405,7 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
       type: 'join_ok',
       freqId,
       listenerCount,
+      freqKey: freqKeyB64,
     }));
 
     // Notify other subscribers about updated listener count
@@ -1416,7 +1428,14 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     const subs = freqSubscribers.get(freqId);
     if (subs) {
       subs.delete(sessionToken);
-      if (subs.size === 0) freqSubscribers.delete(freqId);
+      if (subs.size === 0) {
+        freqSubscribers.delete(freqId);
+        // Delete E2E key when no subscribers remain (forward secrecy)
+        if (freqKeys.has(freqId)) {
+          freqKeys.delete(freqId);
+          console.log('[voice] Deleted E2E key for freq', freqId, '(no subscribers)');
+        }
+      }
     }
 
     // Remove from freq_listeners DB
@@ -1502,6 +1521,11 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
           }
         } else {
           freqSubscribers.delete(freqId);
+          // Delete E2E key when no subscribers remain (forward secrecy)
+          if (freqKeys.has(freqId)) {
+            freqKeys.delete(freqId);
+            console.log('[voice] Deleted E2E key for freq', freqId, '(no subscribers)');
+          }
         }
       }
     }

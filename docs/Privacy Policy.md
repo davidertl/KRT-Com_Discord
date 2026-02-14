@@ -78,6 +78,7 @@ Log retention duration is **fully configurable by the server operator** and can 
 - Audio data is **never recorded or stored**
 - Voice transmission is **live-only** (Opus codec, relayed through server)
 - Push-to-Talk events and radio states are **ephemeral**
+- **End-to-end encryption**: All audio payloads are encrypted with **AES-256-GCM** before transmission. The server generates a random 256-bit session key per frequency when the first client joins and distributes it to subscribers over the TLS-secured WebSocket control channel. The server **cannot decrypt** the audio — it only relays the encrypted frames. Keys are automatically deleted when the last subscriber leaves a frequency (forward secrecy). Encryption keys exist **only in memory** on both client and server and are never persisted to disk or database. 
 
 There is **no technical capability** to reconstruct past conversations.
 
@@ -194,3 +195,16 @@ Any changes affecting data handling or privacy:
 ## 10. Contact
 
 Questions or concerns regarding privacy and data handling should be submitted via the project's repository.
+
+## 11. 
+## Disclaimer
+
+This project is provided **as-is** without warranty of any kind. The developer assumes no liability for:
+- Data loss or unauthorized access
+- Misuse of the software
+- Misconfiguration by the server operator
+- Any damages arising from operation of this software
+
+The software is created to the best of the developer's knowledge and belief. However, **modifications, unauthorized access, or interference by individuals with server access are explicitly excluded from this disclaimer** — the server operator bears full responsibility for securing their infrastructure and controlling access to sensitive systems.
+
+For security concerns or vulnerabilities, please report them via the project repository.

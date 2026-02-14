@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -117,6 +118,9 @@ public sealed class VoiceService : IDisposable
     // ---- reconnect support ----
     private bool _intentionalDisconnect;
     private readonly HashSet<int> _activeFrequencies = new();
+
+    // ---- per-frequency E2E audio encryption (AES-256-GCM) ----
+    private readonly AudioEncryptionService _audioEncryption = new();
 
     // ---- connection info ----
     private string _host = "";
@@ -305,6 +309,7 @@ public sealed class VoiceService : IDisposable
         if (!IsConnected || _ws == null) return;
 
         _activeFrequencies.Remove(freqId);
+        _audioEncryption.RemoveFreqKey(freqId);
         var msg = new { type = "leave", freqId };
         await WsSendAsync(msg, _cts!.Token);
     }
@@ -418,11 +423,26 @@ public sealed class VoiceService : IDisposable
 
                 if (encodedLen <= 0) continue;
 
-                // Build audio packet: [4 bytes freqId BE][4 bytes sequence BE][encoded opus data]
-                var packet = new byte[8 + encodedLen];
-                BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(0), _currentFreqId);
-                BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4), _txSequence++);
-                Array.Copy(encoded, 0, packet, 8, encodedLen);
+                // Encrypt the Opus payload if we have a frequency key (E2E encryption)
+                var encPayload = _audioEncryption.Encrypt(_currentFreqId, encoded, 0, encodedLen);
+
+                byte[] packet;
+                if (encPayload != null)
+                {
+                    // Encrypted packet: [freqId:4][seq:4][encrypted payload (nonce+ciphertext+tag)]
+                    packet = new byte[8 + encPayload.Length];
+                    BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(0), _currentFreqId);
+                    BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4), _txSequence++);
+                    Array.Copy(encPayload, 0, packet, 8, encPayload.Length);
+                }
+                else
+                {
+                    // Plaintext fallback: [freqId:4][seq:4][opus data]
+                    packet = new byte[8 + encodedLen];
+                    BinaryPrimitives.WriteInt32BigEndian(packet.AsSpan(0), _currentFreqId);
+                    BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4), _txSequence++);
+                    Array.Copy(encoded, 0, packet, 8, encodedLen);
+                }
 
                 _audioSendChannel?.Writer.TryWrite(packet);
             }
@@ -581,7 +601,46 @@ public sealed class VoiceService : IDisposable
                 case "join_ok":
                     var joinFreqId = root.TryGetProperty("freqId", out var jf) ? jf.GetInt32() : 0;
                     var joinListeners = root.TryGetProperty("listenerCount", out var jl) ? jl.GetInt32() : 0;
+
+                    // Store per-frequency E2E encryption key (distributed by server over TLS)
+                    if (root.TryGetProperty("freqKey", out var fkProp))
+                    {
+                        var freqKeyB64 = fkProp.GetString();
+                        if (!string.IsNullOrEmpty(freqKeyB64))
+                        {
+                            try
+                            {
+                                _audioEncryption.SetFreqKey(joinFreqId, freqKeyB64);
+                            }
+                            catch (Exception ex)
+                            {
+                                Status($"[E2E] Failed to set freq key for {joinFreqId}: {ex.Message}");
+                            }
+                        }
+                    }
+
                     FreqJoined?.Invoke(joinFreqId, joinListeners);
+                    break;
+
+                case "freq_key_update":
+                    // Server rotated the encryption key for a frequency
+                    var fkuFreq = root.TryGetProperty("freqId", out var fkuf) ? fkuf.GetInt32() : 0;
+                    if (root.TryGetProperty("freqKey", out var fkuKey))
+                    {
+                        var keyB64 = fkuKey.GetString();
+                        if (!string.IsNullOrEmpty(keyB64))
+                        {
+                            try
+                            {
+                                _audioEncryption.SetFreqKey(fkuFreq, keyB64);
+                                Status($"[E2E] Key updated for freq {fkuFreq}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Status($"[E2E] Failed to update key for {fkuFreq}: {ex.Message}");
+                            }
+                        }
+                    }
                     break;
 
                 case "listener_update":
@@ -637,7 +696,8 @@ public sealed class VoiceService : IDisposable
 
     /// <summary>
     /// Handle an incoming binary WS frame containing an audio packet.
-    /// Format: [4 bytes freqId BE][4 bytes sequence BE][opus data]
+    /// Format (plaintext):  [4 bytes freqId BE][4 bytes sequence BE][opus data]
+    /// Format (encrypted):  [4 bytes freqId BE][4 bytes sequence BE][12-byte nonce][ciphertext][16-byte GCM tag]
     /// </summary>
     private void HandleAudioFrame(byte[] data, int length)
     {
@@ -664,12 +724,33 @@ public sealed class VoiceService : IDisposable
 
         float pan = settings?.Pan ?? 0.5f;
 
-        int opusLen = length - 8;
+        int payloadLen = length - 8;
+
+        // Decrypt if we have an E2E encryption key for this frequency
+        byte[] opusData;
+        int opusLen;
+        if (_audioEncryption.HasKey(freqId))
+        {
+            var decrypted = _audioEncryption.Decrypt(freqId, data, 8, payloadLen);
+            if (decrypted == null) return; // decryption failed — drop frame
+            opusData = decrypted;
+            opusLen = decrypted.Length;
+        }
+        else
+        {
+            // No key — treat payload as plaintext Opus
+            opusData = data;
+            opusLen = payloadLen;
+        }
 
         // ---- Broadcast deduplication ----
         // If the same sequence + identical Opus data arrives on multiple frequencies
         // within 20ms, it's a broadcast. Merge settings and play once.
-        int opusHash = ComputeOpusHash(data, 8, opusLen);
+        // When E2E encryption is active, dedup is computed on the *decrypted* Opus bytes
+        // because each sender uses a random nonce, making ciphertexts unique.
+        int opusHash = _audioEncryption.HasKey(freqId)
+            ? ComputeOpusHash(opusData, 0, opusLen)
+            : ComputeOpusHash(data, 8, opusLen);
         lock (_broadcastLock)
         {
             long now = DateTime.UtcNow.Ticks;
@@ -702,8 +783,12 @@ public sealed class VoiceService : IDisposable
             _broadcastFreqCount = 1;
         }
 
-        var opusData = new byte[opusLen];
-        Array.Copy(data, 8, opusData, 0, opusLen);
+        // If payload was plaintext (no encryption key), extract the opus bytes now
+        if (!_audioEncryption.HasKey(freqId))
+        {
+            opusData = new byte[opusLen];
+            Array.Copy(data, 8, opusData, 0, opusLen);
+        }
 
         // Decode Opus to PCM
         try
@@ -952,6 +1037,9 @@ public sealed class VoiceService : IDisposable
 
         _opusEncoder = null;
         _opusDecoder = null;
+
+        // Wipe all frequency encryption keys on disconnect
+        _audioEncryption.ClearAllKeys();
     }
 
     public void Dispose()

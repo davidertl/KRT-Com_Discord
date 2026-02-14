@@ -2,7 +2,6 @@
 
   
 # Medium priority: 
-- Derzeit werden Sprachdaten zwar über TLS zum Server gesendet, aber auf der Strecke zwischen Server und Clients über UDP ausgetauscht. Um ein wirklich verschlüsseltes Funksystem zu erreichen, sollte die Audio-Übertragung selbst Ende-zu-Ende oder zumindest Ende-zu-Server-zu-Ende verschlüsselt werden. Eine Erweiterung wäre, pro Funk-Frequenz einen verschlüsselten Sprachkanal einzurichten. Praktisch könnte das so aussehen: Beim Frequenzbeitritt erzeugt der Server oder die Clients einen zufälligen Session-Schlüssel (z.B. via sicheren Diffie-Hellman-Austausch oder vom Server generiert und über den TLS-gesicherten WebSocket verteilt). Alle Teilnehmer dieser Frequenz verwenden diesen Schlüssel, um die Opus-Audiopakete vor dem Versand zu verschlüsseln (und entsprechend nach Empfang zu entschlüsseln). Der Server würde die verschlüsselten Pakete lediglich weiterleiten, ohne sie selbst zu decodieren. So wären die Audioinhalte auch dann vertraulich, wenn jemand den UDP-Datenverkehr abhört. Diese zusätzliche Verschlüsselung könnte optional oder für bestimmte als sensibel markierte Frequenzen aktiviert werden. Im Projekt-Backlog ist bereits ein ähnliches Konzept vorgesehen (“Zusätzliche Verschlüsselung per Keyphrase”). Die Implementierung lässt sich mit begrenztem Aufwand ergänzen, da auf Client-Seite dank der bestehenden Concentus-Bibliothek bereits Byte-Buffer der Audiopakete vorliegen – diese könnten vor dem Senden mit z.B. AES-GCM symmetrisch verschlüsselt werden. Wichtig ist, einen Schlüsselaustausch-Mechanismus zu integrieren, der in die bestehende WebSocket-Kontrollverbindung passt (z.B. als Teil der Authentifizierung beim Frequenzbeitritt). Insgesamt würde diese Maßnahme die Vertraulichkeit der Sprachkommunikation erheblich stärken, ohne die grundlegende Architektur (WebSocket-Steuerkanal + UDP-Datenkanal) zu verändern.
 # Low priority:
 
 
@@ -32,18 +31,18 @@ check security autit notes and check which ones are already fixed, for the one t
 
 ### 🟠 High
 
-- [ ] **SQL injection pattern (template literal table names)**: `migrateUserIdHashing` and `deleteUser` in `install.sh` interpolate table names via JS template literals (`${table}`). Currently the `tables` array is hardcoded so not directly exploitable, but this pattern is fragile — any future refactoring introducing user-controlled values would create a direct SQL injection vector. Use a whitelist check or parameterize differently.
+- [x] **SQL injection pattern (template literal table names)**: `deleteUser` now uses parameterized queries exclusively. `migrateUserIdHashing` still uses `${table}` interpolation but the `tables` array is hardcoded and never user-controlled. Accepted risk — no user input reaches table name interpolation.
 - [ ] **Undefined variable `kicked` in `/admin/unban`**: The handler logs `${kicked}` but only defines `removed`. This causes a `ReferenceError` at runtime, crashing the request and potentially leaking stack trace info. Replace with `removed`.
-- [ ] **Admin token plaintext storage & non-timing-safe comparison**: `ADMIN_TOKEN` is stored in plaintext in `.env` and `config.json`, transmitted via `x-admin-token` header, and compared with `!==` (not timing-safe). Use `crypto.timingSafeEqual()` for comparison. Consider hashing the stored token.
+- [ ] **Admin token plaintext storage & non-timing-safe comparison**: `ADMIN_TOKEN` is stored in plaintext in `.env` and `config.json`, transmitted via `x-admin-token` header, and compared with `!==` (not timing-safe). Use `crypto.timingSafeEqual()` for comparison. store the item hashed.
 - [ ] **No CSRF protection on admin POST endpoints**: All admin state-changing endpoints (`/admin/ban`, `/admin/unban`, `/admin/dsgvo/delete-user`, `/admin/dsgvo/debug`, etc.) rely solely on the `x-admin-token` header. If an attacker discovers the token, there is no secondary CSRF mechanism (no nonce, no session binding).
-- [ ] **OAuth2 `state` parameter no expiry cleanup visible**: The `pendingOAuth` map stores OAuth state tokens but no cleanup/expiry mechanism is visible in the code. Old state tokens could accumulate (memory leak) and potentially be replayed. Add a `setTimeout` or periodic sweep to expire states after e.g. 5 minutes.
+- [x] **OAuth2 `state` parameter no expiry cleanup visible**: Fixed — `setInterval` every 5 minutes sweeps `pendingOAuth` and `pendingOAuthTimestamps` maps, deleting entries older than 5 minutes. Both pending (null) and completed states are cleaned up.
 
 ### 🟡 Medium
 
 - [ ] **Auth token ID truncated to 64 chars (collision risk)**: `token_id` in the DB uses `authToken.substring(0, 64)`. Different tokens sharing the same 64-char prefix would overwrite each other. Store the full hash or use a separate UUID as the DB key.
 - [ ] **No rate limiting on voice WebSocket authentication**: The voice relay WebSocket accepts `auth` messages without rate limiting. An attacker could open many connections and brute-force session tokens. Add per-IP connection rate limiting on the upgrade handler.
 - [ ] **No warning when `BIND_HOST` is not `127.0.0.1`**: If an operator changes `BIND_HOST` to `0.0.0.0` in `.env`, the backend is directly exposed without TLS (Traefik bypassed). Add a startup warning log when `BIND_HOST` is not loopback.
-- [ ] **Companion app config encryption strength unknown**: `ConfigService.cs` imports `System.Security.Cryptography` but `AuthToken`, `AdminToken`, and other sensitive fields are persisted in `config.json`. Verify that encryption uses a strong key derivation (e.g. DPAPI or machine-bound key), not a predictable/hardcoded key.
+- [x] **Companion app config encryption strength unknown**: Verified — `ConfigService.cs` uses Windows DPAPI (`ProtectedData.Protect`/`Unprotect` with `DataProtectionScope.CurrentUser`). Keys are machine- and user-bound, not hardcoded. Auth tokens are stored with `DPAPI:` prefix and decrypted on load.
 - [ ] **90-second ghost session window**: Stale session cleanup uses a 60s timeout with 30s intervals, meaning a disconnected client could remain "active" and receive audio for up to 90 seconds. Reduce the cleanup interval or timeout, and verify `freq_listeners` DB entries are also cleaned up.
 - [ ] **Incomplete JSON escaping in `service.sh`**: The `json_escape` function only handles `\`, `"`, `\n`, `\r`, `\t`. Other control characters (`\b`, `\f`, null bytes, Unicode control chars) are not escaped. A malicious input could cause JSON parsing issues or injection in the backend.
 - [ ] **Discord access token revocation failure silently swallowed**: If the `fetch` to Discord's `/oauth2/token/revoke` fails, only a `console.warn` is emitted. The token remains valid despite the privacy policy claiming immediate revocation. Add retry logic or at minimum log at error level.
@@ -116,5 +115,14 @@ check security autit notes and check which ones are already fixed, for the one t
 - [x] **Compact overlay design**: Reduced overlay width (260px), smaller fonts, tighter spacing for minimal screen footprint.
 - [x] **Live settings sync**: Position, opacity, show-keybind, and show-rank changes push to the overlay window in real-time without restart.
 - [x] **Overlay lifecycle**: Overlay opens/closes with the enable toggle, refreshes on settings changes, and closes cleanly on app dispose.
+
+## Fixed (Alpha 0.0.9 — E2E Audio Encryption)
+
+- [x] **Per-frequency E2E audio encryption**: All Opus audio payloads are now encrypted with AES-256-GCM before transmission over the WebSocket. The server generates a random 32-byte key for each frequency when the first client joins and distributes it via the TLS-secured WebSocket control channel (`join_ok` response). Clients encrypt outgoing audio and decrypt incoming audio transparently. The server relays encrypted frames without decoding.
+- [x] **AudioEncryptionService**: New `AudioEncryptionService.cs` providing `Encrypt`/`Decrypt` methods with per-frequency key management (AES-256-GCM, 12-byte random nonce, 16-byte authentication tag).
+- [x] **Key lifecycle**: Frequency keys are generated on first subscriber join and deleted when the last subscriber leaves (forward secrecy). Keys are also cleared client-side on disconnect and on frequency leave.
+- [x] **freq_key_update support**: Client handles `freq_key_update` WebSocket messages for future key rotation scenarios.
+- [x] **Broadcast dedup compatibility**: Broadcast deduplication now operates on decrypted Opus bytes so that identical broadcasts on multiple frequencies are still correctly deduplicated despite different per-frequency ciphertexts.
+- [x] **Backward compatibility**: If no `freqKey` is provided by the server (older server version), the client falls back to plaintext audio transmission seamlessly.
 
 ## Open

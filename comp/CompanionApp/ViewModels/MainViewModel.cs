@@ -18,7 +18,7 @@ namespace CompanionApp.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
-    public const string AppVersion = "Alpha 0.0.8";
+    public const string AppVersion = "Alpha 0.0.9";
 
     private CompanionConfig _config = new();
     private HotkeyHook? _hook;

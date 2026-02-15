@@ -617,6 +617,7 @@ log_info "[12/12] Deploye Backend Source Code"
 write_file_backup "$BACKEND_DIR/index.js" "$(cat <<'EOF'
 'use strict';
 
+const crypto = require('crypto');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 

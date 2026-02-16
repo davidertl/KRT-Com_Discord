@@ -4,7 +4,6 @@ namespace CompanionApp.Models;
 
 public class CompanionConfig
 {
-    public string DiscordUserId { get; set; } = "";
     public int RadioSlot { get; set; } = 1;
     public int SampleRate { get; set; } = 48000;
 

@@ -20,6 +20,8 @@ optional add the checkmark to this setting to add the keybind for the radio.
 -ElgatoStreamDeck integration: Implementing integration with Elgato Stream Deck to allow users to control their radio communication (e.g., push-to-talk, frequency switching, profiles) directly from their Stream Deck device. This would provide a convenient and customizable way for users to manage their radio interactions without needing to switch between applications or use keyboard shortcuts. The integration could include features such as assigning specific buttons for different frequencies, toggling the radio on/off, or even displaying real-time information about active communications. This would enhance the user experience and make it easier for streamers and gamers to incorporate the radio system into their workflow.
 -add a webSocket API for controlling the radio from external applications (e.g., Stream Deck, custom scripts). This API would allow users to send commands to the radio system, such as changing frequencies, toggling push-to-talk, adjusting volume levels, or applying specific profiles. By providing a standardized interface for external control, users could integrate the radio system with various tools and platforms, enhancing its versatility and usability. The API could be secured with authentication tokens to ensure that only authorized applications can control the radio, and it could support both RESTful endpoints for simple commands and WebSocket connections for real-time updates and interactions.
 -profiles for channel settings: allowing users to create and save profiles for different channel configurations (e.g., specific frequencies, volume levels, ducking settings) that can be quickly applied based on their current activity or preferences. This would enable users to easily switch between different setups for various scenarios, such as gaming sessions, streaming, or casual communication. The profiles could be managed through the companion app, with options to create, edit, and delete profiles as needed. This feature would enhance the flexibility and usability of the radio system, allowing users to tailor their experience to their specific needs and preferences.
+-channel sync between discord and krt-com: if a user switches discord voice channel that is assigned to a frequency the companion app should automatically switch to that frequency. This option is not set by default and can be enabled in the companion app settings.
+-Channel Sync on startup
 
 # Error tracking: 
 
@@ -27,21 +29,39 @@ optional add the checkmark to this setting to add the keybind for the radio.
 # Security Audit and debugging:
 check security autit notes and check which ones are already fixed, for the one thar are fixed mark them as fixed.
 
-## Security audit notes for version 0.0.8. AI generated:
+## Security audit notes for version 0.0.10. AI generated:
 
 ### 🔴 Critical
 
+- [x] **Voice relay accepts raw Discord ID without token auth**: When no `authToken` is provided in the WS auth message, the voice relay accepts a raw `discordUserId` as sole authentication. Any attacker knowing a guild member's public Discord ID can impersonate them on all frequencies. (install.sh, voice.js handleAuth)
 
 ### 🟠 High
 
+- [x] **`POST /tx/event` has no authentication requirement**: Anonymous callers can create phantom TX start/stop events stored in the DB and broadcast to all WS subscribers. Bearer token is checked but not required — `hashedUid` being `null` is accepted. (install.sh, http.js)
+- [x] **Multiple data endpoints unauthenticated**: `GET /state`, `GET /tx/recent`, `GET /users/recent`, `GET /users/:guildId/:userId`, `GET /state/:discordUserId` expose hashed user IDs, display names, and activity patterns without any authentication. (install.sh, http.js)
+- [x] **XSS in OAuth callback HTML response**: `displayName` from Discord is concatenated directly into the OAuth success HTML without escaping. A crafted nickname like `<img onerror=alert(1)>` executes JavaScript. (install.sh, http.js OAuth callback)
+- [x] **No `LimitNOFILE` in backend systemd service**: Default Linux ulimit (~1024) will cause WebSocket failures at ~600+ connections. Traefik service has `LimitNOFILE=65536` but the backend does not. (install.sh, systemd service)
 
 ### 🟡 Medium
 
+- [x] **DSGVO cleanup misses `auth_tokens` and `freq_listeners`**: Expired auth tokens (24h TTL) accumulate forever. Stale `freq_listeners` entries can remain after crashes. Neither table is cleaned by the 24h DSGVO scheduler. (install.sh, dsgvo.js runCleanup)
+- [x] **Guild deletion incomplete**: `deleteGuild()` misses the `auth_tokens` table (which has a `guild_id` column). Tokens for deleted guilds persist indefinitely. (install.sh, dsgvo.js)
+- [x] **No limit on frequencies per user**: A single authenticated user can join all 9000 frequencies (1000–9999), consuming memory and making audio forwarding loops expensive. (install.sh, voice.js handleJoin)
+- [x] **No per-client WS message rate limiting after auth**: After authentication, there is no rate limit on control messages (join/leave/mute/unmute). A client could flood the server with join/leave cycles causing excessive DB writes. (install.sh, voice.js)
+- [x] **Admin token sent unnecessarily on TX events**: `SendTxEventAsync` sends the `x-admin-token` header alongside the Bearer token on every PTT press. The TX endpoint doesn't require admin auth, so this unnecessarily exposes the admin token. (BackendClient.cs)
+- [x] **Admin token exposed in process list via `curl -H`**: All admin API calls in service.sh use `curl -H "x-admin-token: $VAL"` which is visible via `ps aux` to other users on the system. (service.sh)
+- [x] **Backend systemd service lacks security hardening**: No `NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, or `CapabilityBoundingSet` directives (unlike the Traefik service which has all of these). (install.sh, systemd service)
+- [ ] **OAuth state parameter uses `Guid.NewGuid()`**: Produces 122 bits of entropy instead of 256-bit CSPRNG. Low practical risk (brute-force infeasible) but not best practice. Accepted risk. (MainViewModel.cs)
 
 ### 🟢 Low
 
+- [ ] **`sed` in service.sh/install.sh vulnerable to special characters**: Domain input containing `|`, `&`, or `\` can break sed substitution commands. Not exploitable for code execution (interactive input only). Accepted risk.
+- [ ] **`.env` heredoc uses unquoted expansion**: `<<ENVEOF` (not `<<'ENVEOF'`) means bash interprets `$`, backquotes, and `\` in secrets. Discord secrets are typically alphanumeric but this is fragile. Accepted risk.
+- [ ] **Token payload includes raw guild ID**: The signed auth token stores `gid` as a raw Discord guild snowflake. Guild IDs are semi-public server config, not PII. Accepted risk.
+- [ ] **Display names in server console logs**: Console logs include personal display names in plaintext. Server logs are the operator's responsibility per the privacy policy. Accepted risk.
 
-## Companion App Security Audit (Alpha 0.0.9)
+
+## Companion App Security Audit (Alpha 0.0.10)
 
 ### 🔴 Critical
 
@@ -64,6 +84,8 @@ check security autit notes and check which ones are already fixed, for the one t
 
 
 # Changelog
+
+
 
 ## Fixed (Alpha 0.0.4 patch)
 
@@ -154,3 +176,14 @@ token payload instead of the request body.
 - [ ] **Shared `OpusDecoder` across frequencies**: A single decoder instance handles audio from all frequency channels. Opus decoders maintain internal prediction state; interleaving frames from different senders can cause brief audio artifacts (clicks/distortion). Accepted risk — per-frequency decoders planned for a future update.
 - [ ] **`ConvertToMono48k` hardcodes `bytesPerSample = 4`**: Assumes IEEE float format. If a WASAPI device delivers 16-bit PCM (rare in shared mode), produces garbage audio. Accepted risk — WASAPI shared mode always uses float format in practice.
 - [ ] **Dead code `start` in voice.js return**: The `createVoiceRelay` return object included `start` but no such function was defined. Fixed as part of the voice.js extra brace fix (property removed).
+
+- [x] **banned_users raw_discord_id removed**: The `banned_users` table no longer stores the raw Discord User ID. Only the HMAC-SHA256 hashed ID is stored. Migration code drops the `raw_discord_id` column from existing databases.
+- [x] **discordUserId stripped from all broadcasts**: `discordUserId` / `discord_user_id` is removed from all WebSocket broadcasts (voice relay rx messages, /ws hub, voice_state changes) and REST responses (`GET /state`, `GET /tx/recent`, `POST /tx/event`). Other users never receive Discord User IDs.
+- [x] **TX events not persisted in DSGVO mode**: `POST /tx/event` no longer stores events in the database when DSGVO compliance mode is enabled. Events are still relayed live to voice relay subscribers.
+- [x] **/tx/recent returns empty in DSGVO mode**: `GET /tx/recent` returns an empty array when DSGVO mode is active, preventing historical TX data from being served.
+- [x] **TX events removed from public /ws hub**: TX event broadcasts are no longer sent to the public WebSocket hub. They are only relayed through the authenticated voice relay.
+- [x] **/ws snapshot sends frequency counts only**: The WebSocket hub snapshot no longer sends full user records. It now sends `{ freqCounts: { freq: count } }` — listener counts as numbers only, no user details.
+- [x] **/users/recent restricted to admin**: `GET /users/recent` now requires admin authentication (`requireAdmin`) instead of just a bearer token.
+- [x] **voice_state broadcast stripped of user IDs**: Voice state change broadcasts strip `discordUserId` before forwarding to connected clients.
+- [x] **Debug log deleted on disable**: The companion app now deletes the `debug.log` file when the user disables debug logging, preventing stale log accumulation.
+- [x] **Companion app rx handler hardened**: The companion app no longer parses `discordUserId` from received voice relay messages, relying only on the `username` field for display.

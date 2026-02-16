@@ -205,7 +205,7 @@ bash service.sh [start|stop|restart|status|logs|menu]
 
 - **Transport**: TLS (HTTPS/WSS) via Traefik. DSGVO-HTTPS-Enforcement lehnt unverschlüsselten Traffic ab.
 - **Authentifizierung**: Discord OAuth2 (Authorization Code Flow). HMAC-SHA256 signierte Tokens mit 24h Gültigkeit.
-- **Datenschutz**: **User-ID-Hashing** (HMAC-SHA256). In der Datenbank werden keine rohen Discord-IDs gespeichert (außer für Bans im Admin-View). Bei einem Leak sind IDs nicht rekonstruierbar.
+- **Datenschutz**: **User-ID-Hashing** (HMAC-SHA256). In der Datenbank werden keine rohen Discord-IDs gespeichert. Bei einem Leak sind IDs nicht rekonstruierbar. Discord User IDs werden niemals an andere Nutzer übertragen — nur Anzeigenamen werden geteilt.
 - **Zugriffsschutz**: Ban-System, Admin-Tokens (nicht persistiert in der App), Debug-Endpoints sind standardmäßig deaktiviert.
 
 ---
@@ -220,7 +220,7 @@ SQLite (WAL Mode) mit folgendem Schema:
 | `tx_events` | Historie der Sendevorgänge (PTT) |
 | `voice_sessions` | Aktive WebSocket-Verbindungen |
 | `freq_listeners` | Zuordnung User -> Frequenzen |
-| `banned_users` | Blacklist (gehasht + raw für Admin) |
+| `banned_users` | Blacklist (nur gehashte IDs) |
 | `auth_tokens` | Gültige Sitzungstoken |
 | `policy_acceptance`| Versionierte Bestätigung der Datenschutzregeln |
 | `discord_users` | Cache für Anzeigenamen (gehashte IDs) |
@@ -230,7 +230,6 @@ SQLite (WAL Mode) mit folgendem Schema:
 ## Roadmap
 
 ### Zeitnah
-- [ ] **Rate-Limiting** & Security-Härtung (CORS, Helmet)
 - [ ] ACLs für Frequenzen (Berechtigungen)
 - [ ] Statusabhängige Erreichbarkeit
 - [ ] Notfall-Funk Erweiterungen (Caller-Anzeige, Alarm-Beeps)
@@ -247,6 +246,16 @@ SQLite (WAL Mode) mit folgendem Schema:
 ## Changelog
 
 ### Alpha 0.0.10
+
+**Security Patch:**
+- **banned_users raw_discord_id entfernt**: Nur noch gehashte IDs in der Ban-Tabelle. Migration droppt die `raw_discord_id`-Spalte.
+- **discordUserId aus allen Broadcasts entfernt**: Discord User IDs werden aus Voice-Relay, /ws Hub, voice_state Broadcasts und REST-Responses gestripped. Andere User erhalten niemals Discord-IDs.
+- **TX-Events in DSGVO-Modus nicht persistiert**: `POST /tx/event` speichert keine Events wenn DSGVO aktiv. `GET /tx/recent` gibt leeres Array zurück.
+- **TX-Events nicht mehr über /ws Hub**: TX-Broadcasts nur noch über authentifizierten Voice-Relay.
+- **/ws Snapshot nur Frequenz-Counts**: Keine User-Details mehr, nur `{ freqCounts: { freq: count } }`.
+- **/users/recent nur für Admins**: Erfordert jetzt Admin-Token statt Bearer.
+- **Debug-Log bei Deaktivierung gelöscht**: Companion App löscht `debug.log` beim Ausschalten.
+- **Companion RX-Handler gehärtet**: Kein Parsing von `discordUserId` aus empfangenen Voice-Nachrichten.
 
 **Bug Fixes & Code Audit:**
 - **ConfigService.Save() Datenverlust behoben**: 19 Properties (Sound-Toggles, Overlay, Ducking) wurden bei jedem Speichern auf Standardwerte zurückgesetzt.

@@ -125,7 +125,6 @@ public sealed class VoiceService : IDisposable
     // ---- connection info ----
     private string _host = "";
     private int _wsPort = 3000;
-    private string _discordUserId = "";
     private string _guildId = "";
     private string _authToken = "";
 
@@ -203,7 +202,7 @@ public sealed class VoiceService : IDisposable
     /// Connect to the voice relay server.
     /// Returns true when authenticated successfully, false otherwise.
     /// </summary>
-    public async Task<bool> ConnectAsync(string host, int wsPort, string discordUserId, string guildId, string authToken = "")
+    public async Task<bool> ConnectAsync(string host, int wsPort, string guildId, string authToken = "")
     {
         _intentionalDisconnect = false;
 
@@ -217,7 +216,6 @@ public sealed class VoiceService : IDisposable
 
         _host = host;
         _wsPort = wsPort;
-        _discordUserId = discordUserId;
         _guildId = guildId;
         _authToken = authToken ?? "";
 
@@ -262,10 +260,8 @@ public sealed class VoiceService : IDisposable
 
         Status("WebSocket connected, sending auth...");
 
-        // Send auth message (prefer token-based auth if available)
-        var auth = string.IsNullOrEmpty(_authToken)
-            ? new { type = "auth", discordUserId, guildId, authToken = (string?)null }
-            : new { type = "auth", discordUserId, guildId, authToken = (string?)_authToken };
+        // Send auth message (token-based auth; raw IDs omitted for privacy)
+        var auth = new { type = "auth", discordUserId = "", guildId = _guildId, authToken = string.IsNullOrEmpty(_authToken) ? (string?)null : _authToken };
         await WsSendAsync(auth, ct);
 
         // Start WS receive loop (will process auth_ok with UDP port)
@@ -594,13 +590,12 @@ public sealed class VoiceService : IDisposable
 
                 case "rx":
                     // Someone is transmitting on a freq we're listening to
-                    // { type: "rx", freqId, discordUserId, username, action: "start"|"stop" }
+                    // { type: "rx", freqId, username, action: "start"|"stop" }
                     var rxFreqId = root.TryGetProperty("freqId", out var rf) ? rf.GetInt32() : 0;
-                    var rxUser = root.TryGetProperty("discordUserId", out var du) ? du.GetString() ?? "" : "";
-                    var rxName = root.TryGetProperty("username", out var un) ? un.GetString() ?? rxUser : rxUser;
+                    var rxName = root.TryGetProperty("username", out var un) ? un.GetString() ?? "" : "";
                     var rxAction = root.TryGetProperty("action", out var ra) ? ra.GetString() : "";
 
-                    RxStateChanged?.Invoke(rxUser, rxName, rxFreqId, rxAction ?? "");
+                    RxStateChanged?.Invoke("", rxName, rxFreqId, rxAction ?? "");
                     break;
 
                 case "join_ok":

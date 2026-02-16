@@ -243,13 +243,12 @@ public sealed class BackendClient : IDisposable
     /// <summary>
     /// Notify backend of TX start/stop. Returns listener count for the frequency, or -1 on failure.
     /// </summary>
-    public async Task<int> SendTxEventAsync(int freqId, string action, string discordUserId, int radioSlot)
+    public async Task<int> SendTxEventAsync(int freqId, string action, int radioSlot)
     {
         var payload = new
         {
             freqId,
             action,
-            discordUserId,
             radioSlot,
             meta = new
             {
@@ -264,10 +263,8 @@ public sealed class BackendClient : IDisposable
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
 
-        if (!string.IsNullOrWhiteSpace(_adminToken))
-        {
-            req.Headers.Add("x-admin-token", _adminToken);
-        }        if (!string.IsNullOrWhiteSpace(_authToken))
+        // TX event uses Bearer token only — admin token not needed on this endpoint
+        if (!string.IsNullOrWhiteSpace(_authToken))
         {
             req.Headers.Add("Authorization", $"Bearer {_authToken}");
         }
@@ -280,9 +277,9 @@ public sealed class BackendClient : IDisposable
     /// <summary>
     /// Register as listener on a frequency. Returns listener count, or -1 on failure.
     /// </summary>
-    public async Task<int> JoinFrequencyAsync(string discordUserId, int freqId, int radioSlot)
+    public async Task<int> JoinFrequencyAsync(int freqId, int radioSlot)
     {
-        var payload = new { discordUserId, freqId, radioSlot };
+        var payload = new { freqId, radioSlot };
         var json = JsonSerializer.Serialize(payload);
         using var req = new HttpRequestMessage(HttpMethod.Post, "freq/join")
         {
@@ -298,9 +295,9 @@ public sealed class BackendClient : IDisposable
     /// <summary>
     /// Unregister as listener on a frequency. Returns listener count, or -1 on failure.
     /// </summary>
-    public async Task<int> LeaveFrequencyAsync(string discordUserId, int freqId)
+    public async Task<int> LeaveFrequencyAsync(int freqId)
     {
-        var payload = new { discordUserId, freqId };
+        var payload = new { freqId };
         var json = JsonSerializer.Serialize(payload);
         using var req = new HttpRequestMessage(HttpMethod.Post, "freq/leave")
         {

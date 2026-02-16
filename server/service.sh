@@ -114,6 +114,27 @@ get_admin_token() {
   grep -E '^ADMIN_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true
 }
 
+# Helper: curl wrapper that hides admin token from process list.
+# Usage: admin_curl [curl_args...]
+# The admin token is passed via a temp config file (chmod 600) instead of -H on the CLI,
+# so it does not appear in 'ps aux' output.
+admin_curl() {
+  local _ac_token
+  _ac_token="$(get_admin_token)"
+  if [ -z "${_ac_token:-}" ]; then
+    echo ""
+    return 1
+  fi
+  local _ac_cfg
+  _ac_cfg="$(mktemp)"
+  chmod 600 "$_ac_cfg"
+  printf -- '-H "x-admin-token: %s"\n' "$_ac_token" > "$_ac_cfg"
+  curl --config "$_ac_cfg" "$@"
+  local _rc=$?
+  rm -f "$_ac_cfg"
+  return $_rc
+}
+
 # --------------------------------------------------
 # DSGVO Compliance Functions
 # --------------------------------------------------
@@ -125,7 +146,7 @@ show_dsgvo_warnings() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  RESPONSE="$(admin_curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" 2>/dev/null || true)"
   if [ -z "$RESPONSE" ]; then
     return
   fi
@@ -156,7 +177,7 @@ do_dsgvo_status() {
 
   log_info "DSGVO Status:"
   local RESPONSE
-  RESPONSE="$(curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  RESPONSE="$(admin_curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" 2>/dev/null || true)"
   if [ -z "$RESPONSE" ]; then
     log_error "Backend nicht erreichbar"
     return
@@ -192,8 +213,7 @@ do_dsgvo_toggle() {
   [[ "$TOGGLE" =~ ^[jJ]$ ]] && ENABLED_VAL="true"
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/toggle" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/toggle" \
     -H "content-type: application/json" \
     -d "{\"enabled\":${ENABLED_VAL}}" 2>/dev/null || true)"
 
@@ -217,16 +237,16 @@ do_dsgvo_debug_toggle() {
   [[ "$TOGGLE" =~ ^[jJ]$ ]] && ENABLED_VAL="true"
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/debug" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/debug" \
     -H "content-type: application/json" \
     -d "{\"enabled\":${ENABLED_VAL}}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     if [ "$ENABLED_VAL" = "true" ]; then
-      log_warn "Debug-Modus AKTIVIERT — DSGVO Compliance automatisch deaktiviert, Aufbewahrung: 7 Tage"
+      log_warn "Debug-Modus AKTIVIERT → DSGVO Compliance wurde automatisch DEAKTIVIERT, Aufbewahrung: 7 Tage"
     else
       log_ok "Debug-Modus DEAKTIVIERT"
+      log_info "DSGVO Compliance wird automatisch wieder aktiviert, sofern kein Debug-Logging (>= debugLOG) aktiv ist."
     fi
   else
     log_error "Fehler beim Umschalten: $RESPONSE"
@@ -254,8 +274,7 @@ do_dsgvo_delete_user() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-user" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-user" \
     -H "content-type: application/json" \
     -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
@@ -289,8 +308,7 @@ do_dsgvo_delete_guild() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-guild" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-guild" \
     -H "content-type: application/json" \
     -d "{\"guildId\":\"$(json_escape "$GUILD_ID")\"}" 2>/dev/null || true)"
 
@@ -318,8 +336,7 @@ do_dsgvo_cleanup() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/cleanup" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/cleanup" \
     -H "content-type: application/json" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
@@ -345,7 +362,7 @@ do_channel_sync_status() {
 
   log_info "Kanal-Sync Status:"
   local RESPONSE
-  RESPONSE="$(curl -sS "http://127.0.0.1:3000/admin/channel-sync/status" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  RESPONSE="$(admin_curl -sS "http://127.0.0.1:3000/admin/channel-sync/status" 2>/dev/null || true)"
   if [ -z "$RESPONSE" ]; then
     log_error "Backend nicht erreichbar"
     return
@@ -380,8 +397,7 @@ do_channel_sync_trigger() {
 
   log_info "Löse Kanal-Sync manuell aus..."
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/trigger" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/trigger" \
     -H "content-type: application/json" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
@@ -413,8 +429,7 @@ do_channel_sync_interval() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/interval" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/channel-sync/interval" \
     -H "content-type: application/json" \
     -d "{\"hours\":${HOURS}}" 2>/dev/null || true)"
 
@@ -445,8 +460,7 @@ do_ban_user() {
   read -r -p "$(echo -e "${CYAN}Grund (optional): ${NC}")" BAN_REASON
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/ban" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/ban" \
     -H "content-type: application/json" \
     -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\",\"reason\":\"$(json_escape "$BAN_REASON")\"}" 2>/dev/null || true)"
 
@@ -472,8 +486,7 @@ do_unban_user() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/unban" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/unban" \
     -H "content-type: application/json" \
     -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
@@ -494,7 +507,7 @@ do_list_bans() {
 
   log_info "Banliste:"
   local RESPONSE
-  RESPONSE="$(curl -sS "http://127.0.0.1:3000/admin/bans" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  RESPONSE="$(admin_curl -sS "http://127.0.0.1:3000/admin/bans" 2>/dev/null || true)"
   if [ -z "$RESPONSE" ]; then
     log_error "Backend nicht erreichbar"
     return
@@ -525,8 +538,7 @@ do_delete_and_ban() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-and-ban" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/delete-and-ban" \
     -H "content-type: application/json" \
     -d "{\"discordUserId\":\"$(json_escape "$USER_ID")\"}" 2>/dev/null || true)"
 
@@ -906,7 +918,7 @@ do_toggle_debug_login() {
 
   # Check current debug mode state
   local STATUS_RESP
-  STATUS_RESP="$(curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  STATUS_RESP="$(admin_curl -sS "http://127.0.0.1:3000/admin/dsgvo/status" 2>/dev/null || true)"
   local CURRENT_DEBUG
   CURRENT_DEBUG="$(echo "$STATUS_RESP" | grep -o '"debugMode":[a-z]*' | cut -d: -f2 || true)"
 
@@ -932,17 +944,17 @@ do_toggle_debug_login() {
   [ "$CURRENT_DEBUG" = "true" ] && NEW_STATE="false"
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/debug" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/dsgvo/debug" \
     -H "content-type: application/json" \
     -d "{\"enabled\":${NEW_STATE}}" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     if [ "$NEW_STATE" = "true" ]; then
       log_warn "Debug-Modus AKTIVIERT → POST /auth/login ist jetzt erreichbar"
-      log_warn "DSGVO Compliance automatisch deaktiviert, Aufbewahrung: 7 Tage"
+      log_warn "DSGVO Compliance wurde automatisch DEAKTIVIERT, Aufbewahrung: 7 Tage"
     else
       log_ok "Debug-Modus DEAKTIVIERT → POST /auth/login ist jetzt gesperrt (nur OAuth2)"
+      log_info "DSGVO Compliance wird automatisch wieder aktiviert, sofern kein Debug-Logging (>= debugLOG) aktiv ist."
     fi
   else
     log_error "Fehler beim Umschalten: $RESPONSE"
@@ -962,7 +974,7 @@ do_logging_status() {
 
   log_info "Log-Level Status:"
   local HTTP_CODE BODY FULL_RESP
-  FULL_RESP="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || true)"
+  FULL_RESP="$(admin_curl -sS -w '\n%{http_code}' "http://127.0.0.1:3000/admin/log-level" 2>/dev/null || true)"
   HTTP_CODE="$(echo "$FULL_RESP" | tail -1)"
   BODY="$(echo "$FULL_RESP" | head -n -1)"
   if [ -z "$BODY" ]; then
@@ -1014,7 +1026,7 @@ do_logging_set() {
 
   # Pre-check if endpoint exists
   local CHECK_CODE
-  CHECK_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/log-level" -H "x-admin-token: $ADMIN_TOKEN_VAL" 2>/dev/null || echo 0)"
+  CHECK_CODE="$(admin_curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/log-level" 2>/dev/null || echo 0)"
   if [ "$CHECK_CODE" != "200" ]; then
     log_error "Logging-Endpunkt nicht verfügbar (HTTP $CHECK_CODE)"
     log_info "Bitte Backend neu deployen (install.sh), damit /admin/log-level verfügbar wird."
@@ -1075,13 +1087,17 @@ do_logging_set() {
   fi
 
   local RESPONSE
-  RESPONSE="$(curl -sS -X POST "http://127.0.0.1:3000/admin/log-level" \
-    -H "x-admin-token: $ADMIN_TOKEN_VAL" \
+  RESPONSE="$(admin_curl -sS -X POST "http://127.0.0.1:3000/admin/log-level" \
     -H "content-type: application/json" \
     -d "$JSON_BODY" 2>/dev/null || true)"
 
   if echo "$RESPONSE" | grep -q '"ok":true'; then
     log_ok "Log-Level für ${SERVICE} auf ${LEVEL} gesetzt"
+    if [ "$LEVEL" != "minimalLOG" ]; then
+      log_warn "Debug-Logging aktiv → DSGVO Compliance wurde automatisch DEAKTIVIERT"
+    else
+      log_info "DSGVO Compliance wird automatisch wieder aktiviert, sofern keine Debug-Features mehr aktiv sind."
+    fi
   else
     log_error "Fehler: $RESPONSE"
   fi
@@ -1174,32 +1190,13 @@ do_menu() {
         do_logs
         ;;
       9)
-        log_input "TX Event senden"
-        read -r -p "$(echo -e "${CYAN}freqId [1060]: ${NC}")" FREQ_ID_IN
-        FREQ_ID_IN="${FREQ_ID_IN:-1060}"
-        read -r -p "$(echo -e "${CYAN}action [start/stop] (default: start): ${NC}")" ACTION_IN
-        ACTION_IN="${ACTION_IN:-start}"
-
-        # Validate numeric freqId
-        if ! [[ "$FREQ_ID_IN" =~ ^[0-9]+$ ]]; then
-          log_error "Ungültige freqId: '$FREQ_ID_IN' (muss eine Zahl sein)"
-        elif curl -sf -X POST "http://127.0.0.1:3000/tx/event" \
-          -H "content-type: application/json" \
-          -d "{\"freqId\":${FREQ_ID_IN},\"action\":\"$(json_escape "$ACTION_IN")\"}" >/dev/null; then
-          log_ok "TX Event gesendet"
-        else
-          log_error "TX Event fehlgeschlagen"
-        fi
+        log_warn "Entfernt — TX/Users-Endpunkte erfordern jetzt Bearer-Token-Authentifizierung (nur über Companion App)."
         ;;
       10)
-        log_info "TX Recent: http://127.0.0.1:3000/tx/recent?limit=10"
-        curl -sS "http://127.0.0.1:3000/tx/recent?limit=10" || true
-        echo ""
+        log_warn "Entfernt — TX/Users-Endpunkte erfordern jetzt Bearer-Token-Authentifizierung (nur über Companion App)."
         ;;
       11)
-        log_info "Users Recent: http://127.0.0.1:3000/users/recent?limit=10"
-        curl -sS "http://127.0.0.1:3000/users/recent?limit=10" || true
-        echo ""
+        log_warn "Entfernt — TX/Users-Endpunkte erfordern jetzt Bearer-Token-Authentifizierung (nur über Companion App)."
         ;;
 
       # --- DSGVO Compliance ---
@@ -1238,7 +1235,7 @@ do_menu() {
 
         ADMIN_TOKEN_VAL="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
         if [ -n "${ADMIN_TOKEN_VAL:-}" ]; then
-          if curl -sf -X POST "http://127.0.0.1:3000/admin/reload" -H "x-admin-token: $ADMIN_TOKEN_VAL" >/dev/null; then
+          if admin_curl -sf -X POST "http://127.0.0.1:3000/admin/reload" >/dev/null; then
             log_ok "channels.json neu geladen (/admin/reload)"
           else
             log_warn "Reload fehlgeschlagen – starte Backend neu"

@@ -200,6 +200,14 @@ WorkingDirectory=$BACKEND_DIR
 ExecStart=/usr/bin/node index.js
 Restart=always
 EnvironmentFile=$ENV_FILE
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=$BACKEND_DIR
+PrivateTmp=true
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
@@ -647,11 +655,22 @@ function mustEnv(name) {
  * Idempotent (immernoch ein geiles wort!) 
  */
 function migrateUserIdHashing(db) {
-  // 1. Ensure raw_discord_id column exists on banned_users (for fresh vs upgraded DBs)
+  // 1. Drop raw_discord_id column from banned_users if it exists (privacy fix)
   const cols = db.prepare('PRAGMA table_info(banned_users)').all();
-  if (!cols.some(c => c.name === 'raw_discord_id')) {
-    db.exec('ALTER TABLE banned_users ADD COLUMN raw_discord_id TEXT');
-    console.log('[migration] Added raw_discord_id column to banned_users');
+  if (cols.some(c => c.name === 'raw_discord_id')) {
+    // SQLite doesn't support DROP COLUMN before 3.35; recreate table without the column
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS banned_users_new (
+        discord_user_id TEXT PRIMARY KEY,
+        banned_at_ms    INTEGER NOT NULL,
+        reason          TEXT
+      );
+      INSERT OR IGNORE INTO banned_users_new (discord_user_id, banned_at_ms, reason)
+        SELECT discord_user_id, banned_at_ms, reason FROM banned_users;
+      DROP TABLE banned_users;
+      ALTER TABLE banned_users_new RENAME TO banned_users;
+    `);
+    console.log('[migration] Removed raw_discord_id column from banned_users (privacy fix)');
   }
 
   // 2. Check if migration is needed (heuristic: raw Discord snowflakes are 17-20 decimal digits)
@@ -695,7 +714,7 @@ function migrateUserIdHashing(db) {
     if (migrated > 0) console.log(`[migration]   ${table}: hashed ${migrated} user IDs`);
   }
 
-  // 4. Migrate banned_users (preserve raw ID for admin display)
+  // 4. Migrate banned_users (hash raw IDs, no raw ID stored)
   const bannedRows = db.prepare('SELECT discord_user_id, banned_at_ms, reason FROM banned_users').all();
   let bannedMigrated = 0;
   const migrateBanned = db.transaction(() => {
@@ -703,12 +722,12 @@ function migrateUserIdHashing(db) {
       const raw = row.discord_user_id;
       if (/^[0-9a-f]{64}$/.test(raw)) continue;
       const hashed = hashUserId(raw);
-      db.prepare('UPDATE banned_users SET discord_user_id = ?, raw_discord_id = ? WHERE discord_user_id = ?').run(hashed, raw, raw);
+      db.prepare('UPDATE banned_users SET discord_user_id = ? WHERE discord_user_id = ?').run(hashed, raw);
       bannedMigrated++;
     }
   });
   migrateBanned();
-  if (bannedMigrated > 0) console.log(`[migration]   banned_users: hashed ${bannedMigrated} entries (raw IDs preserved)`);
+  if (bannedMigrated > 0) console.log(`[migration]   banned_users: hashed ${bannedMigrated} entries`);
 
   console.log('[migration] User ID hashing migration complete');
 }
@@ -788,7 +807,6 @@ function migrateUserIdHashing(db) {
     tokenSecret,
     dsgvo,
   });
-  voiceRelay.start();
 
   // Wire voice relay to HTTP server (for ban-kick functionality)
   if (typeof httpServer._setVoiceRelay === 'function') {
@@ -860,7 +878,8 @@ function migrateUserIdHashing(db) {
   // Wire TX broadcast (keine circular deps)
   if (typeof httpServer._setOnTxEvent === 'function') {
     httpServer._setOnTxEvent((payload) => {
-      wsHub.broadcast({ type: 'tx_event', payload });
+      // Only send to voice relay (ephemeral rx notifications to freq subscribers)
+      // Do NOT broadcast TX events on the public /ws hub (privacy)
       voiceRelay.notifyTxEvent(payload);
     });
   }
@@ -872,7 +891,11 @@ function migrateUserIdHashing(db) {
     mapping,
     stateStore,
     usersStore,
-    onStateChange: (payload) => wsHub.broadcast({ type: 'voice_state', payload }),
+    onStateChange: (payload) => {
+      // Strip discordUserId from voice_state broadcast (privacy)
+      const { discordUserId, ...safePayload } = payload;
+      wsHub.broadcast({ type: 'voice_state', payload: safePayload });
+    },
     channelSyncIntervalHours: Number(process.env.CHANNEL_SYNC_INTERVAL_HOURS || 24),
   });
 
@@ -994,6 +1017,7 @@ function initDb(dbPath) {
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       freq_id         INTEGER NOT NULL,
       discord_user_id TEXT,
+      display_name    TEXT,
       radio_slot      INTEGER,
       action          TEXT NOT NULL CHECK(action IN ('start','stop')),
       ts_ms           INTEGER NOT NULL,
@@ -1046,10 +1070,9 @@ function initDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_voice_sessions_user
       ON voice_sessions(discord_user_id);
 
-    -- Banned users (minimal: user ID + timestamp + optional reason)
+    -- Banned users (minimal: hashed user ID + timestamp + optional reason)
     CREATE TABLE IF NOT EXISTS banned_users (
       discord_user_id TEXT PRIMARY KEY,
-      raw_discord_id  TEXT,
       banned_at_ms    INTEGER NOT NULL,
       reason          TEXT
     );
@@ -1091,20 +1114,27 @@ write_file_backup "$SRC_DIR/tx.js" "$(cat <<'EOF'
 'use strict';
 
 function createTxStore(db) {
+  // Ensure display_name column exists (migration for existing DBs)
+  const cols = db.prepare('PRAGMA table_info(tx_events)').all();
+  if (!cols.some(c => c.name === 'display_name')) {
+    db.exec('ALTER TABLE tx_events ADD COLUMN display_name TEXT');
+    console.log('[migration] Added display_name column to tx_events');
+  }
+
   const insertStmt = db.prepare(`
-    INSERT INTO tx_events (freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json)
-    VALUES (@freq_id, @discord_user_id, @radio_slot, @action, @ts_ms, @meta_json)
+    INSERT INTO tx_events (freq_id, discord_user_id, display_name, radio_slot, action, ts_ms, meta_json)
+    VALUES (@freq_id, @discord_user_id, @display_name, @radio_slot, @action, @ts_ms, @meta_json)
   `);
 
   const listRecentStmt = db.prepare(`
-    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
+    SELECT id, freq_id, discord_user_id, display_name, radio_slot, action, ts_ms, meta_json
     FROM tx_events
     ORDER BY ts_ms DESC
     LIMIT ?
   `);
 
   const listRecentByFreqStmt = db.prepare(`
-    SELECT id, freq_id, discord_user_id, radio_slot, action, ts_ms, meta_json
+    SELECT id, freq_id, discord_user_id, display_name, radio_slot, action, ts_ms, meta_json
     FROM tx_events
     WHERE freq_id = ?
     ORDER BY ts_ms DESC
@@ -1189,6 +1219,9 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
   const ipAuthAttempts = new Map(); // ip -> { count, resetAt }
   const WS_AUTH_WINDOW_MS = 60000;
   const WS_AUTH_MAX = 10;
+  const MAX_FREQ_PER_USER = parseInt(process.env.MAX_FREQ_PER_USER, 10) || 20;
+  const WS_CTRL_RATE_LIMIT = 60; // max control messages per second per client
+  const WS_CTRL_WINDOW_MS = 1000;
 
   // Clean up stale DB rows from a previous crash/restart
   db.prepare('DELETE FROM freq_listeners').run();
@@ -1201,6 +1234,10 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
       let sessionToken = null;
       const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
 
+      // Per-connection control message rate limiter
+      let ctrlCount = 0;
+      let ctrlResetAt = Date.now() + WS_CTRL_WINDOW_MS;
+
       ws.on('message', (raw, isBinary) => {
         // Binary = audio frame
         if (isBinary) {
@@ -1208,7 +1245,18 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
           return;
         }
 
-        // Text = control message
+        // Text = control message — rate limit (excluding auth which has its own limiter)
+        const now = Date.now();
+        if (now > ctrlResetAt) {
+          ctrlCount = 0;
+          ctrlResetAt = now + WS_CTRL_WINDOW_MS;
+        }
+        ctrlCount++;
+        if (ctrlCount > WS_CTRL_RATE_LIMIT) {
+          ws.close(4029, 'control message rate limit exceeded');
+          return;
+        }
+
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
 
@@ -1326,18 +1374,24 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
       resolvedUserId = payload.uid;
       resolvedGuildId = payload.gid;
       resolvedDisplayName = payload.name;
+    } else if (tokenSecret) {
+      // Token auth is configured but no token was provided — reject.
+      // Raw Discord IDs must not be accepted when token auth is available.
+      ws.send(JSON.stringify({ type: 'auth_error', reason: 'token required' }));
+      ws.close(4001, 'token required');
+      return;
+    } else {
+      // Legacy / debug mode: no tokenSecret configured, hash the raw ID.
+      if (!resolvedUserId || !resolvedGuildId) {
+        ws.send(JSON.stringify({ type: 'auth_error', reason: 'missing credentials' }));
+        return;
+      }
+      resolvedUserId = hashUserId(String(resolvedUserId));
     }
 
     if (!resolvedUserId || !resolvedGuildId) {
       ws.send(JSON.stringify({ type: 'auth_error', reason: 'missing credentials' }));
       return;
-    }
-
-    // When no signed token was used, the resolvedUserId is a raw Discord snowflake.
-    // Hash it so all downstream code (sessions, DB, ban checks) uses the hashed form.
-    // When a signed token WAS used, payload.uid is already hashed.
-    if (!(authToken && tokenSecret)) {
-      resolvedUserId = hashUserId(String(resolvedUserId));
     }
 
     // Check allowed guilds
@@ -1409,6 +1463,12 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     const freqId = Number(msg.freqId);
     if (!Number.isInteger(freqId) || freqId < 1000 || freqId > 9999) {
       session.ws.send(JSON.stringify({ type: 'join_error', reason: 'bad freqId' }));
+      return;
+    }
+
+    // Enforce per-user frequency limit
+    if (!session.frequencies.has(freqId) && session.frequencies.size >= MAX_FREQ_PER_USER) {
+      session.ws.send(JSON.stringify({ type: 'join_error', reason: 'frequency limit reached (max ' + MAX_FREQ_PER_USER + ')' }));
       return;
     }
 
@@ -1584,19 +1644,20 @@ function createVoiceRelay({ db, usersStore, allowedGuildIds = [], tokenSecret = 
     const subs = freqSubscribers.get(freqId);
     if (!subs || subs.size === 0) return;
 
-    // Look up sender's display name from their session
-    let username = discordUserId;
-    for (const [, session] of sessions) {
-      if (session.discordUserId === discordUserId) {
-        username = session.displayName || username;
-        break;
+    // Use display name from payload (extracted from Bearer token), fall back to session lookup
+    let username = payload.displayName || discordUserId;
+    if (!payload.displayName) {
+      for (const [, session] of sessions) {
+        if (session.discordUserId === discordUserId) {
+          username = session.displayName || username;
+          break;
+        }
       }
     }
 
     const msg = JSON.stringify({
       type: 'rx',
       freqId,
-      discordUserId,
       username,
       action,
     });
@@ -2274,9 +2335,15 @@ function createWsHub({ stateStore, tokenSecret }) {
       return;
     }
 
-    // Snapshot: voice_state
+    // Snapshot: send only frequency listener counts (no user IDs)
     const recent = stateStore.listRecent(200);
-    send(ws, { type: 'snapshot', payload: recent });
+    const freqCounts = {};
+    for (const row of recent) {
+      if (row.freq_id) {
+        freqCounts[row.freq_id] = (freqCounts[row.freq_id] || 0) + 1;
+      }
+    }
+    send(ws, { type: 'snapshot', payload: { freqCounts } });
 
     ws.on('message', (buf) => {
       try {
@@ -2294,7 +2361,13 @@ function createWsHub({ stateStore, tokenSecret }) {
       });
     },
     broadcast: (obj) => {
-      const msg = JSON.stringify(obj);
+      // Strip discord_user_id / discordUserId from broadcast payloads (privacy)
+      const sanitized = { ...obj };
+      if (sanitized.payload) {
+        const { discordUserId, discord_user_id, ...rest } = sanitized.payload;
+        sanitized.payload = rest;
+      }
+      const msg = JSON.stringify(sanitized);
       for (const ws of wss.clients) {
         if (ws.readyState === WebSocket.OPEN) ws.send(msg);
       }
@@ -2368,11 +2441,13 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
       voice_state: 0,
       discord_users: 0,
       voice_sessions: 0,
+      auth_tokens: 0,
     };
 
     deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE guild_id = ?').run(gid).changes;
     deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE guild_id = ?').run(gid).changes;
     deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE guild_id = ?').run(gid).changes;
+    deleted.auth_tokens    = db.prepare('DELETE FROM auth_tokens WHERE guild_id = ?').run(gid).changes;
 
     const total = Object.values(deleted).reduce((a, b) => a + b, 0);
     console.log(`[dsgvo] Deleted ${total} rows for guild ${gid}`, deleted);
@@ -2393,12 +2468,18 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
       tx_events: 0,
       discord_users: 0,
       voice_sessions: 0,
+      auth_tokens: 0,
+      freq_listeners: 0,
+      policy_acceptance: 0,
     };
 
-    deleted.voice_state    = db.prepare('DELETE FROM voice_state WHERE updated_at_ms < ?').run(cutoff).changes;
-    deleted.tx_events      = db.prepare('DELETE FROM tx_events WHERE ts_ms < ?').run(cutoff).changes;
-    deleted.discord_users  = db.prepare('DELETE FROM discord_users WHERE updated_at_ms < ?').run(cutoff).changes;
-    deleted.voice_sessions = db.prepare('DELETE FROM voice_sessions WHERE last_seen_ms < ?').run(cutoff).changes;
+    deleted.voice_state        = db.prepare('DELETE FROM voice_state WHERE updated_at_ms < ?').run(cutoff).changes;
+    deleted.tx_events          = db.prepare('DELETE FROM tx_events WHERE ts_ms < ?').run(cutoff).changes;
+    deleted.discord_users      = db.prepare('DELETE FROM discord_users WHERE updated_at_ms < ?').run(cutoff).changes;
+    deleted.voice_sessions     = db.prepare('DELETE FROM voice_sessions WHERE last_seen_ms < ?').run(cutoff).changes;
+    deleted.auth_tokens        = db.prepare('DELETE FROM auth_tokens WHERE expires_at_ms < ?').run(cutoff).changes;
+    deleted.freq_listeners     = db.prepare('DELETE FROM freq_listeners WHERE connected_at_ms < ?').run(cutoff).changes;
+    deleted.policy_acceptance  = db.prepare('DELETE FROM policy_acceptance WHERE accepted_at_ms < ?').run(cutoff).changes;
 
     const total = Object.values(deleted).reduce((a, b) => a + b, 0);
     _lastCleanup = new Date().toISOString();
@@ -2437,17 +2518,62 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   }
 
   function setEnabled(enabled) {
-    _enabled = !!enabled;
+    const want = !!enabled;
+    if (want && _anyDebugActive()) {
+      console.warn('[dsgvo] Cannot enable DSGVO compliance while debug features are active. Disable debug mode and set all log levels to minimalLOG first.');
+      return;
+    }
+    _enabled = want;
     console.log(`[dsgvo] Compliance mode ${_enabled ? 'ENABLED' : 'DISABLED'}`);
+  }
+
+  /** Returns true if any debug feature (debug mode or debug logging) is active. */
+  function _anyDebugActive() {
+    return _debugMode || _debugLoggingActive;
   }
 
   function setDebugMode(enabled) {
     _debugMode = !!enabled;
     if (_debugMode) {
-      console.log('[dsgvo] Debug mode ENABLED | retention extended to 7 days. DSGVO compliance remains ' + (_enabled ? 'ENABLED' : 'DISABLED') + ' (independent setting).');
-      console.warn('[SECURITY WARNING] Debug mode is active. Data retention is extended to 7 days. DSGVO auto-cleanup will use extended retention window.');
+      // Auto-disable DSGVO when debug mode is activated
+      if (_enabled) {
+        _enabled = false;
+        console.log('[dsgvo] DSGVO compliance auto-DISABLED because debug mode was activated.');
+      }
+      console.log('[dsgvo] Debug mode ENABLED | retention extended to 7 days.');
+      console.warn('[SECURITY WARNING] Debug mode is active. Data retention is extended to 7 days. DSGVO auto-cleanup is paused.');
     } else {
       console.log('[dsgvo] Debug mode DISABLED');
+      // Auto-re-enable DSGVO if no other debug features are active
+      if (!_debugLoggingActive && !_enabled) {
+        _enabled = true;
+        console.log('[dsgvo] DSGVO compliance auto-ENABLED (all debug features are now off).');
+      }
+    }
+  }
+
+  let _debugLoggingActive = false;
+
+  /**
+   * Called by the log-level endpoint when any service's effective level changes.
+   * @param {boolean} active  true if any log level >= debugLOG is set
+   */
+  function setDebugLoggingActive(active) {
+    _debugLoggingActive = !!active;
+    if (_debugLoggingActive) {
+      // Auto-disable DSGVO when debug logging is activated
+      if (_enabled) {
+        _enabled = false;
+        console.log('[dsgvo] DSGVO compliance auto-DISABLED because debug logging was activated.');
+      }
+      console.log('[dsgvo] Debug logging active | DSGVO compliance paused.');
+    } else {
+      console.log('[dsgvo] Debug logging inactive (all levels at minimalLOG).');
+      // Auto-re-enable DSGVO if no other debug features are active
+      if (!_debugMode && !_enabled) {
+        _enabled = true;
+        console.log('[dsgvo] DSGVO compliance auto-ENABLED (all debug features are now off).');
+      }
     }
   }
 
@@ -2461,10 +2587,14 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   function getStatus() {
     const warnings = [];
     if (!_enabled) {
-      if (_debugMode) {
-        warnings.push('DSGVO compliance mode is DISABLED because debug mode is active');
+      if (_debugMode && _debugLoggingActive) {
+        warnings.push('DSGVO compliance auto-DISABLED: debug mode AND debug logging are active');
+      } else if (_debugMode) {
+        warnings.push('DSGVO compliance auto-DISABLED: debug mode is active');
+      } else if (_debugLoggingActive) {
+        warnings.push('DSGVO compliance auto-DISABLED: debug logging is active (level >= debugLOG)');
       } else {
-        warnings.push('DSGVO compliance mode is DISABLED | user data will NOT be auto-deleted');
+        warnings.push('DSGVO compliance mode is DISABLED | user data may NOT be auto-deleted');
       }
     }
     if (_debugToolActive) {
@@ -2478,6 +2608,7 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
     return {
       dsgvoEnabled: _enabled,
       debugMode: _debugMode,
+      debugLoggingActive: _debugLoggingActive,
       debugToolActive: _debugToolActive,
       retentionDays: _debugMode ? 7 : 2,
       schedulerRunning: !!_schedulerHandle,
@@ -2491,11 +2622,11 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   // All functions receive pre-hashed discord user IDs.
   // banUser additionally stores the raw ID for admin display.
 
-  function banUser(hashedUserId, rawUserId, reason) {
+  function banUser(hashedUserId, reason) {
     const hid = String(hashedUserId);
     db.prepare(
-      'INSERT OR REPLACE INTO banned_users (discord_user_id, raw_discord_id, banned_at_ms, reason) VALUES (?, ?, ?, ?)'
-    ).run(hid, rawUserId ? String(rawUserId) : null, Date.now(), reason || null);
+      'INSERT OR REPLACE INTO banned_users (discord_user_id, banned_at_ms, reason) VALUES (?, ?, ?)'
+    ).run(hid, Date.now(), reason || null);
     console.log('[dsgvo] Banned user', hid.substring(0, 12) + '...');
   }
 
@@ -2512,7 +2643,7 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
   }
 
   function listBanned() {
-    return db.prepare('SELECT discord_user_id, raw_discord_id, banned_at_ms, reason FROM banned_users ORDER BY banned_at_ms DESC').all();
+    return db.prepare('SELECT discord_user_id, banned_at_ms, reason FROM banned_users ORDER BY banned_at_ms DESC').all();
   }
 
   /**
@@ -2520,9 +2651,9 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
    * @param {string} hashedUserId  Pre-hashed discord user ID
    * @param {string} rawUserId     Raw discord user ID (for admin display)
    */
-  function deleteAndBanUser(hashedUserId, rawUserId, reason) {
+  function deleteAndBanUser(hashedUserId, reason) {
     const deleteResult = deleteUser(hashedUserId);
-    banUser(hashedUserId, rawUserId, reason || 'data deletion');
+    banUser(hashedUserId, reason || 'data deletion');
     return { ...deleteResult, banned: true };
   }
 
@@ -2550,6 +2681,7 @@ function createDsgvo({ db, dsgvoEnabled = false, debugMode = false }) {
     stopScheduler,
     setEnabled,
     setDebugMode,
+    setDebugLoggingActive,
     setDebugToolActive,
     getStatus,
     banUser,
@@ -2620,6 +2752,26 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
 
   // Auth-specific rate limiter (stricter: 20 requests per 15 min)
   const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+
+  // Helper: require valid Bearer token on an endpoint
+  function requireBearer(req, res) {
+    const authHeader = req.header('authorization') || '';
+    if (!authHeader.startsWith('Bearer ') || !tokenSecret) {
+      res.status(401).json({ ok: false, error: 'unauthorized' });
+      return null;
+    }
+    const payload = verifyToken(authHeader.slice(7), tokenSecret);
+    if (!payload || !payload.uid) {
+      res.status(401).json({ ok: false, error: 'invalid or expired token' });
+      return null;
+    }
+    return payload;
+  }
+
+  // Helper: escape HTML to prevent XSS
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
 
   // Helper: revoke Discord access token with retry
   async function revokeDiscordToken(accessToken) {
@@ -2946,7 +3098,8 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
       // Revoke Discord access token (we don't need it anymore)
       revokeDiscordToken(discordAccessToken);
       console.log('[oauth] Login OK: ' + hashedId.substring(0, 12) + '... (' + displayName + ') in guild ' + matchedGuildId);
-      res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>\u2713 Login Successful</h2><p>Logged in as <strong>' + displayName + '</strong></p><p style="color:#888">You can close this window and return to the companion app.</p></body></html>');
+      const safeDisplayName = String(displayName).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      res.send('<html><body style="background:#1a1a2e;color:#4AFF9E;font-family:sans-serif;text-align:center;padding:60px"><h2>\u2713 Login Successful</h2><p>Logged in as <strong>' + safeDisplayName + '</strong></p><p style="color:#888">You can close this window and return to the companion app.</p></body></html>');
     } catch (e) {
       console.error('[oauth] Callback error:', e);
       pendingOAuth.set(state, { error: 'server_error', timestamp: Date.now() });
@@ -2977,23 +3130,36 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   app.get('/state/:discordUserId', (req, res) => {
+    const tokenPayload = requireBearer(req, res);
+    if (!tokenPayload) return;
     const hashedId = hashUserId(req.params.discordUserId);
+    // Only allow users to query their own state
+    if (hashedId !== tokenPayload.uid) {
+      return res.status(403).json({ ok: false, error: 'forbidden: can only query own state' });
+    }
     const row = stateStore.get(hashedId);
     res.json({ ok: true, data: row });
   });
 
   app.get('/state', (req, res) => {
+    const tokenPayload = requireBearer(req, res);
+    if (!tokenPayload) return;
     const raw = parseInt(req.query.limit, 10);
     const limit = Math.min(Number.isFinite(raw) ? raw : 200, 1000);
     const rows = stateStore.listRecent(limit);
-    res.json({ ok: true, data: rows });
+    // Strip discord_user_id — only expose frequency/channel state
+    const sanitized = rows.map(({ discord_user_id, ...rest }) => rest);
+    res.json({ ok: true, data: sanitized });
   });
 
-  // TX: create event
+  // TX: create event (requires valid Bearer token)
   app.post('/tx/event', (req, res) => {
     if (!txStore) return res.status(500).json({ ok: false, error: 'txStore_not_configured' });
 
-    const { freqId, action, discordUserId, radioSlot, meta } = req.body || {};
+    const tokenPayload = requireBearer(req, res);
+    if (!tokenPayload) return;
+
+    const { freqId, action, radioSlot, meta } = req.body || {};
     const f = Number(freqId);
     if (!Number.isInteger(f) || f < 1000 || f > 9999) {
       return res.status(400).json({ ok: false, error: 'bad freqId' });
@@ -3003,53 +3169,56 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     }
     const ts = Date.now();
 
-    // Prefer user identity from signed Bearer token (already hashed)
-    let hashedUid = null;
-    const authHeader = req.headers['authorization'] || '';
-    if (authHeader.startsWith('Bearer ')) {
-      const tokenPayload = verifyToken(authHeader.slice(7), tokenSecret);
-      if (tokenPayload && tokenPayload.uid) {
-        hashedUid = tokenPayload.uid;
-      }
-    }
-    // Fallback: hash raw Discord ID from body (legacy / admin-token callers)
-    if (!hashedUid && discordUserId) {
-      hashedUid = hashUserId(discordUserId);
-    }
+    const hashedUid = tokenPayload.uid;
+    const displayName = tokenPayload.name || null;
     const row = {
       freq_id: f,
       discord_user_id: hashedUid,
+      display_name: displayName,
       radio_slot: (radioSlot === null || radioSlot === undefined) ? null : Number(radioSlot),
       action,
       ts_ms: ts,
       meta_json: meta ? JSON.stringify(meta) : null,
     };
-    txStore.addEvent(row);
+    // Only persist TX events when DSGVO compliance mode is disabled
+    const dsgvoStatus = dsgvo ? dsgvo.getStatus() : {};
+    if (!dsgvoStatus.dsgvoEnabled) {
+      txStore.addEvent(row);
+    }
     const payload = {
       freqId: row.freq_id,
-      discordUserId: hashedUid,
+      displayName: displayName,
       radioSlot: row.radio_slot,
       action: row.action,
       ts: row.ts_ms,
-      meta: meta || null,
     };
     const listenerCount = (db.prepare('SELECT COUNT(DISTINCT discord_user_id) as cnt FROM freq_listeners WHERE freq_id = ?').get(f) || {}).cnt || 0;
 
-    // Broadcast TX event to WebSocket subscribers (voice relay + ws hub)
+    // Broadcast TX event to voice relay only (not the public /ws hub)
+    // The voice relay sends ephemeral rx notifications to freq subscribers
     if (typeof onTxEventFn === 'function') {
-      onTxEventFn(payload);
+      onTxEventFn({ ...payload, discordUserId: hashedUid });
     }
 
     res.json({ ok: true, data: payload, listener_count: listenerCount });
   });
-  // TX: read
+  // TX: read (requires valid Bearer token)
+  // Returns empty in DSGVO mode (TX events are not persisted)
   app.get('/tx/recent', (req, res) => {
+    const tokenPayload = requireBearer(req, res);
+    if (!tokenPayload) return;
+    const dsgvoStatus = dsgvo ? dsgvo.getStatus() : {};
+    if (dsgvoStatus.dsgvoEnabled) {
+      return res.json({ ok: true, data: [], dsgvo: true });
+    }
     const raw = parseInt(req.query.limit, 10);
     const limit = Math.min(Number.isFinite(raw) ? raw : 200, 1000);
     const freq = req.query.freqId ? Number(req.query.freqId) : null;
 
     const rows = freq ? txStore.listRecentByFreq(freq, limit) : txStore.listRecent(limit);
-    res.json({ ok: true, data: rows });
+    // Strip discord_user_id from response rows
+    const sanitized = rows.map(({ discord_user_id, ...rest }) => rest);
+    res.json({ ok: true, data: sanitized });
   });
 
   // Frequency listener registration (requires valid auth token)
@@ -3103,6 +3272,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   app.get('/users/recent', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const raw = parseInt(req.query.limit, 10);
     const limit = Math.min(Number.isFinite(raw) ? raw : 200, 1000);
     const rows = (usersStore && typeof usersStore.listRecent === 'function') ? usersStore.listRecent(limit) : [];
@@ -3110,10 +3280,16 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
   });
 
   app.get('/users/:guildId/:discordUserId', (req, res) => {
+    const tokenPayload = requireBearer(req, res);
+    if (!tokenPayload) return;
     const { guildId, discordUserId } = req.params;
+    const hashedId = hashUserId(discordUserId);
+    // Only allow users to query their own data
+    if (hashedId !== tokenPayload.uid) {
+      return res.status(403).json({ ok: false, error: 'forbidden: can only query own data' });
+    }
     const raw = parseInt(req.query.limit, 10);
     const limit = Math.min(Number.isFinite(raw) ? raw : 200, 1000);
-    const hashedId = hashUserId(discordUserId);
     const row = (usersStore && typeof usersStore.get === 'function') ? usersStore.get(hashedId, guildId) : null;
     res.json({ ok: true, data: row });
   });
@@ -3154,6 +3330,18 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     const { enabled } = req.body || {};
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({ ok: false, error: 'missing boolean "enabled"' });
+    }
+    if (enabled) {
+      // Block enabling DSGVO while any debug feature is active
+      const status = dsgvo.getStatus();
+      const loggerStatus = logger.getStatus();
+      const anyDebugLog = Object.entries(loggerStatus).some(([k, v]) => k !== 'global' && (v || '').replace(' (override)', '') !== 'minimalLOG') || loggerStatus.global !== 'minimalLOG';
+      if (status.debugMode || anyDebugLog) {
+        const reasons = [];
+        if (status.debugMode) reasons.push('debug mode is active');
+        if (anyDebugLog) reasons.push('debug logging is active (level >= debugLOG)');
+        return res.status(400).json({ ok: false, error: 'Cannot enable DSGVO while debug features are active: ' + reasons.join(', ') + '. Disable all debug features first.' });
+      }
     }
     dsgvo.setEnabled(enabled);
     res.json({ ok: true, data: dsgvo.getStatus() });
@@ -3244,7 +3432,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     }
     if (dsgvo && typeof dsgvo.banUser === 'function') {
       const hashedId = hashUserId(String(discordUserId));
-      dsgvo.banUser(hashedId, String(discordUserId), reason || null);
+      dsgvo.banUser(hashedId, reason || null);
       // Kick active voice sessions for this user
       const kicked = _voiceRelay ? _voiceRelay.kickUser(hashedId) : 0;
       console.log(`[admin] Banned user ${hashedId.substring(0, 12)}... → ${kicked} session(s) kicked`);
@@ -3284,7 +3472,7 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     }
     if (dsgvo && typeof dsgvo.deleteAndBanUser === 'function') {
       const hashedId = hashUserId(String(discordUserId));
-      const result = dsgvo.deleteAndBanUser(hashedId, String(discordUserId), reason);
+      const result = dsgvo.deleteAndBanUser(hashedId, reason);
       // Kick active voice sessions for this user
       const kicked = _voiceRelay ? _voiceRelay.kickUser(hashedId) : 0;
       console.log(`[admin] Delete+Ban user ${hashedId.substring(0, 12)}... → ${kicked} session(s) kicked`);
@@ -3309,7 +3497,14 @@ function createHttpServer({ db, mapping, stateStore, txStore, usersStore, dsgvo,
     const target = service || 'all';
     try {
       logger.setLevel(target, level);
-      res.json({ ok: true, data: logger.getStatus() });
+      // Notify DSGVO module about debug logging state change
+      const logStatus = logger.getStatus();
+      const anyDebugLog = Object.entries(logStatus).some(([, v]) => {
+        const effectiveLevel = (v || '').replace(' (override)', '');
+        return effectiveLevel !== 'minimalLOG';
+      });
+      dsgvo.setDebugLoggingActive(anyDebugLog);
+      res.json({ ok: true, data: { logLevel: logStatus, dsgvo: dsgvo.getStatus() } });
       console.log(`[admin] Log-level set: ${target} → ${level}`);
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message });

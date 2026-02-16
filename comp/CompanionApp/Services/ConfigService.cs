@@ -60,6 +60,12 @@ public static class ConfigService
             config.AuthToken = UnprotectString(config.AuthToken);
         }
 
+        // Decrypt GuildId if it was stored encrypted (DPAPI)
+        if (!string.IsNullOrEmpty(config.GuildId))
+        {
+            config.GuildId = UnprotectString(config.GuildId);
+        }
+
         return config;
     }
 
@@ -71,10 +77,9 @@ public static class ConfigService
         // Encrypt AuthToken before saving (DPAPI — current-user scope)
         var configCopy = new CompanionConfig
         {
-            DiscordUserId = config.DiscordUserId,
             RadioSlot = config.RadioSlot,
             SampleRate = config.SampleRate,
-            GuildId = config.GuildId,
+            GuildId = string.IsNullOrEmpty(config.GuildId) ? "" : ProtectString(config.GuildId),
             VoiceHost = config.VoiceHost,
             VoicePort = config.VoicePort,
             AuthToken = string.IsNullOrEmpty(config.AuthToken) ? "" : ProtectString(config.AuthToken),

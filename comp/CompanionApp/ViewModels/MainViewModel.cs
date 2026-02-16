@@ -58,13 +58,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _adminToken = value; OnPropertyChanged(); }
     }
 
-    private string _discordUserId = "";
-    public string DiscordUserId
-    {
-        get => _discordUserId;
-        set { _discordUserId = value; OnPropertyChanged(); }
-    }
-
     private string _guildId = "";
     public string GuildId
     {
@@ -491,7 +484,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                LogDebug("Debug logging disabled");
+                // Delete the debug log file when debug mode is turned off
+                try
+                {
+                    if (File.Exists(_debugLogFilePath))
+                    {
+                        File.Delete(_debugLogFilePath);
+                    }
+                }
+                catch
+                {
+                    // Ignore deletion failures (file in use, permissions, etc.)
+                }
             }
         }
     }
@@ -1385,7 +1389,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _config = config;
 
-        DiscordUserId = config.DiscordUserId;
         GuildId = config.GuildId;
         SampleRate = config.SampleRate;
 
@@ -1543,7 +1546,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyToConfig()
     {
-        _config.DiscordUserId = DiscordUserId;
         _config.GuildId = GuildId;
         _config.SampleRate = SampleRate;
 
@@ -1836,7 +1838,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             // Notify backend of TX start (non-fatal if fails)
             try
             {
-                await _backend.SendTxEventAsync(radio.FreqId, "start", DiscordUserId, radio.Index + 1);
+                await _backend.SendTxEventAsync(radio.FreqId, "start", radio.Index + 1);
             }
             catch (Exception backendEx)
             {
@@ -1883,7 +1885,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (radio != null && _backend != null)
             {
-                await _backend.SendTxEventAsync(radio.FreqId, "stop", DiscordUserId, radio.Index + 1);
+                await _backend.SendTxEventAsync(radio.FreqId, "stop", radio.Index + 1);
             }
         }
         catch
@@ -1992,7 +1994,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         // Create and wire ReconnectManager
         _reconnect = new ReconnectManager(_voice);
-        _reconnect.SetConnectionParams(VoiceHost, VoicePort, DiscordUserId, GuildId, AuthToken);
+        _reconnect.SetConnectionParams(VoiceHost, VoicePort, GuildId, AuthToken);
         _reconnect.StateChanged += OnReconnectStateChanged;
         _reconnect.Log += OnReconnectLog;
         _reconnect.Reconnected += OnReconnectedAsync;

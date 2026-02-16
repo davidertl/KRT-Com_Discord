@@ -67,7 +67,7 @@ Depending on server configuration, the following technical logs may be created:
 - Audio data
 - Voice content
 - Persistent IP histories
-- PTT speech events send the channel-id and the username of the user that triggered the event, but this information is not stored in the database and is only used to display the correct information in the companion app
+- PTT speech events send the channel-id and the username of the user that triggered the event. In DSGVO mode this information is not stored in the database. Discord User IDs are **never** included in data sent to other users — only display names are shared
 - When using emergency frequencies, the client sends extra information to other clients listening on emergency frequencies. This information includes the username, the channel name, and the frequencies the user has active. This information is only stored in memory and is only visible for a set number of entries on each receiving client. It is not stored in the database and is not logged except in debug mode.
 
 Log retention duration is **fully configurable by the server operator** and can be disabled entirely.
@@ -78,7 +78,7 @@ Log retention duration is **fully configurable by the server operator** and can 
 
 - Audio data is **never recorded or stored**
 - Voice transmission is **live-only** (Opus codec, relayed through server)
-- Push-to-Talk events and radio states are **ephemeral**
+- Push-to-Talk events and radio states are **ephemeral** — when DSGVO compliance mode is enabled, TX events are **not stored** in the database at all and are relayed live only
 - **End-to-end encryption**: All audio payloads are encrypted with **AES-256-GCM** before transmission. The server generates a random 256-bit session key per frequency when the first client joins and distributes it to subscribers over the TLS-secured WebSocket control channel. The server **cannot decrypt** the audio — it only relays the encrypted frames. Keys are automatically deleted when the last subscriber leaves a frequency (forward secrecy). Encryption keys exist **only in memory** on both client and server and are never persisted to disk or database. 
 
 There is **no technical capability** to reconstruct past conversations.
@@ -120,7 +120,7 @@ A **hard delete** can be executed for any User ID, removing:
 - Channel and radio mappings
 - Policy acceptance records
 
-Deletion is **irreversible** and should be used with caution. The administrator can set a ban for the user, so that the user cannot log in again after deletion. This prevents the user from creating a new session and generating new data. The ban is stored in a separate table with the hashed user ID, the raw user ID (for admin identification), and a timestamp.
+Deletion is **irreversible** and should be used with caution. The administrator can set a ban for the user, so that the user cannot log in again after deletion. This prevents the user from creating a new session and generating new data. The ban is stored in a separate table with the hashed user ID and a timestamp.
 
 ---
 
@@ -132,11 +132,10 @@ A full deletion operation technically results in:
 
 The ban list stores **minimal information only**:
 - Hashed Discord User ID (HMAC-SHA256, irreversible)
-- Raw Discord User ID (for administrator identification purposes)
 - Timestamp
 - Optional reason
 
-Unbanning a user **does not restore deleted data**.
+No raw Discord User IDs are stored in the ban list. Unbanning a user **does not restore deleted data**.
 
 ---
 
@@ -149,6 +148,7 @@ Unbanning a user **does not restore deleted data**.
   - DSGVO compliance mode remains an **independent setting** and is not affected by debug mode
   - Data retention extends to 7 days instead of 2 days
 - Debug logs are **not persistent** — they are deleted after the configured period and are deleted immediately when debug mode is turned off.
+  - The companion app also deletes its local `debug.log` file when the user disables debug logging.
 - The server administrator is warned in the CLI when debug mode or debug tools are active.
 
 ---

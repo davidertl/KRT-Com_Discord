@@ -26,7 +26,6 @@ public sealed class ReconnectManager : IDisposable
     // ---- Connection parameters (cached from last connect call) ----
     private string _host = "";
     private int _wsPort;
-    private string _discordUserId = "";
     private string _guildId = "";
     private string _authToken = "";
 
@@ -56,11 +55,10 @@ public sealed class ReconnectManager : IDisposable
     /// Cache the connection parameters so we can reconnect without
     /// the caller having to pass them again.
     /// </summary>
-    public void SetConnectionParams(string host, int wsPort, string discordUserId, string guildId, string authToken)
+    public void SetConnectionParams(string host, int wsPort, string guildId, string authToken)
     {
         _host = host;
         _wsPort = wsPort;
-        _discordUserId = discordUserId;
         _guildId = guildId;
         _authToken = authToken;
     }
@@ -74,7 +72,7 @@ public sealed class ReconnectManager : IDisposable
         CancelPendingAttempt();
         TransitionTo(VoiceConnectionState.Connecting);
 
-        bool ok = await _voiceService.ConnectAsync(_host, _wsPort, _discordUserId, _guildId, _authToken);
+        bool ok = await _voiceService.ConnectAsync(_host, _wsPort, _guildId, _authToken);
         if (!ok)
         {
             TransitionTo(VoiceConnectionState.Disconnected);
@@ -159,7 +157,7 @@ public sealed class ReconnectManager : IDisposable
             // Clean up old connection resources before reconnecting
             _voiceService.CleanupForReconnect();
 
-            bool ok = await _voiceService.ConnectAsync(_host, _wsPort, _discordUserId, _guildId, _authToken);
+            bool ok = await _voiceService.ConnectAsync(_host, _wsPort, _guildId, _authToken);
             if (!ok)
             {
                 ScheduleNextAttempt();

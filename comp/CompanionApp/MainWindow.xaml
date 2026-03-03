@@ -988,12 +988,14 @@
                   <StackPanel Grid.Column="0" Margin="0,0,10,0">
                     <TextBlock Text="Host" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                     <TextBox Text="{Binding VoiceHost, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}"/>
+                             Style="{StaticResource ModernTextBox}"
+                             ToolTip="Production: use your domain (no path). Local dev: localhost or 127.0.0.1."/>
                   </StackPanel>
                   <StackPanel Grid.Column="1" Margin="0,0,10,0">
                     <TextBlock Text="Port" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
                     <TextBox Text="{Binding VoicePort, UpdateSourceTrigger=PropertyChanged}" 
-                             Style="{StaticResource ModernTextBox}"/>
+                             Style="{StaticResource ModernTextBox}"
+                             ToolTip="Production TLS usually uses 443. Local dev backend usually uses 3000."/>
                   </StackPanel>
                   <StackPanel Grid.Column="2" VerticalAlignment="Bottom">
                     <Button Content="Verify" Style="{StaticResource ModernButton}" 
@@ -1004,6 +1006,8 @@
                 <!-- Verify Status Text -->
                 <TextBlock Text="{Binding VerifyStatusText}" Foreground="{StaticResource TextSecondary}" 
                            FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"/>
+                <TextBlock Text="Tip: For public servers use domain + port 443 (TLS via Traefik). For local development use localhost + 3000."
+                           Foreground="{StaticResource TextSecondary}" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap"/>
 
                 <!-- Server Status Info (shown after verification) -->
                 <Border Background="#252535" CornerRadius="6" Padding="15" Margin="0,0,0,10"

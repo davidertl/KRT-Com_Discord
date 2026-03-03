@@ -20,9 +20,9 @@ This project follows a **privacy-by-design** and **data minimization** approach:
 
 ## 1.1 Transparency
 
-When installing and updating the software, the user needs to read and agree to the privacy policy. The privacy policy can be fetched after entering IP address and port in the companion app, so that the user can make an informed decision about using the software. If the privacy policy is updated, a notification is displayed in the companion app and the user must read and accept the updated privacy policy before connecting to the server again.
+When installing and updating the software, the user needs to read and agree to the privacy policy. The privacy policy can be fetched after entering the server endpoint in the companion app (production: domain + TLS, typically port 443; local development: localhost + backend port), so that the user can make an informed decision about using the software. If the privacy policy is updated, a notification is displayed in the companion app and the user must read and accept the updated privacy policy before connecting to the server again.
 
-Within this privacy policy, all data that is processed and what for is documented. The current status of the server is displayed when entering the IP and port, so the user can immediately see if the server is in debug mode or DSGVO compliance mode.
+Within this privacy policy, all data that is processed and what for is documented. The current status of the server is displayed when entering the configured endpoint, so the user can immediately see if the server is in debug mode or DSGVO compliance mode.
 
 After reading and accepting the terms and privacy policy, the user can choose to login with Discord OAuth2. The login is handled via Discord's authorization code flow — the user authorizes the application in their browser, and the server receives only the minimum required identity information.
 

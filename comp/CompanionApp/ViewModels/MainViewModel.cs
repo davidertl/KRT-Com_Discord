@@ -960,25 +960,29 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task VerifyServerAsync()
     {
-        var baseUrl = BuildBaseUrl();
+        var endpoint = ResolveServerEndpoint();
+        var baseUrl = BuildBaseUrl(endpoint);
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             VerifyStatusText = "Please enter host and port first";
             return;
         }
 
-        VerifyStatusText = "Verifying server...";
+        VerifyStatusText = endpoint.WasNormalizedToSecurePort
+            ? "Verifying server... (remote :3000 normalized to TLS port 443)"
+            : "Verifying server...";
         IsServerVerified = false;
         PolicyAccepted = false;
 
         try
         {
-            var status = await BackendClient.GetServerStatusAsync(baseUrl);
-            if (status == null)
+            var statusResult = await BackendClient.GetServerStatusAsync(baseUrl);
+            if (statusResult.Data == null)
             {
-                VerifyStatusText = "Server not reachable or invalid response";
+                VerifyStatusText = statusResult.Error ?? "Server not reachable or invalid response";
                 return;
             }
+            var status = statusResult.Data;
 
             ServerVersion = status.Version;
             ServerDsgvoEnabled = status.DsgvoEnabled;
@@ -987,8 +991,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ServerPolicyVersion = status.PolicyVersion;
             OauthEnabled = status.OauthEnabled;
 
-            var policy = await BackendClient.GetPrivacyPolicyAsync(baseUrl);
-            PrivacyPolicyText = policy?.Text ?? "Could not fetch privacy policy.";
+            var policyResult = await BackendClient.GetPrivacyPolicyAsync(baseUrl);
+            PrivacyPolicyText = policyResult.Data?.Text ?? "Could not fetch privacy policy.";
 
             // Check if user already accepted this policy version
             if (_acceptedPolicyVersion == ServerPolicyVersion)
@@ -999,7 +1003,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             IsServerVerified = true;
             OnPropertyChanged(nameof(IsVersionMismatch));
             OnPropertyChanged(nameof(VersionMismatchText));
-            VerifyStatusText = $"Server verified: {status.Version}";
+            VerifyStatusText = endpoint.WasNormalizedToSecurePort
+                ? $"Server verified: {status.Version} (using TLS 443)"
+                : $"Server verified: {status.Version}";
             LogDebug($"[Verify] Server verified: version={status.Version} dsgvo={status.DsgvoEnabled} debug={status.DebugMode} oauth={status.OauthEnabled}");
             if (IsVersionMismatch)
                 LogDebug($"[Verify] VERSION MISMATCH: server={status.Version} companion={AppVersion}");
@@ -1155,16 +1161,75 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private string BuildBaseUrl()
     {
-        if (string.IsNullOrWhiteSpace(VoiceHost)) return "";
-        var cleanHost = VoiceHost
+        var endpoint = ResolveServerEndpoint();
+        return BuildBaseUrl(endpoint);
+    }
+
+    private string BuildBaseUrl(ServerEndpoint endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint.Host) || endpoint.Port < 1 || endpoint.Port > 65535)
+        {
+            return "";
+        }
+
+        var isDefaultPort = (endpoint.Scheme == "https" && endpoint.Port == 443)
+            || (endpoint.Scheme == "http" && endpoint.Port == 80);
+        return isDefaultPort
+            ? $"{endpoint.Scheme}://{endpoint.Host}"
+            : $"{endpoint.Scheme}://{endpoint.Host}:{endpoint.Port}";
+    }
+
+    private static bool IsLoopbackHost(string host)
+        => host is "127.0.0.1" or "localhost" or "::1";
+
+    private ServerEndpoint ResolveServerEndpoint()
+    {
+        var rawHost = VoiceHost?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(rawHost))
+        {
+            return new ServerEndpoint("", VoicePort, "https", false);
+        }
+
+        var schemeHint = "";
+        if (rawHost.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            schemeHint = "https";
+        }
+        else if (rawHost.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            schemeHint = "http";
+        }
+
+        Uri? parsedUri = null;
+        if (!Uri.TryCreate(rawHost, UriKind.Absolute, out parsedUri))
+        {
+            Uri.TryCreate("https://" + rawHost, UriKind.Absolute, out parsedUri);
+        }
+
+        var host = parsedUri?.Host ?? rawHost
             .Replace("https://", "", StringComparison.OrdinalIgnoreCase)
             .Replace("http://", "", StringComparison.OrdinalIgnoreCase)
             .TrimEnd('/');
-        // Default to HTTPS; only use HTTP for explicit localhost
-        var isLocalhost = cleanHost is "127.0.0.1" or "localhost" or "::1";
-        var scheme = (VoiceHost.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || isLocalhost) ? "http" : "https";
-        return $"{scheme}://{cleanHost}:{VoicePort}";
+
+        var parsedPort = parsedUri is { IsDefaultPort: false } ? parsedUri.Port : (int?)null;
+        var selectedPort = parsedPort ?? VoicePort;
+        var isLocalhost = IsLoopbackHost(host);
+
+        // Security: force encrypted transport for non-localhost targets.
+        var scheme = isLocalhost
+            ? (schemeHint == "https" ? "https" : "http")
+            : "https";
+
+        var normalizedToSecurePort = !isLocalhost && scheme == "https" && selectedPort == 3000;
+        if (normalizedToSecurePort)
+        {
+            selectedPort = 443;
+        }
+
+        return new ServerEndpoint(host, selectedPort, scheme, normalizedToSecurePort);
     }
+
+    private sealed record ServerEndpoint(string Host, int Port, string Scheme, bool WasNormalizedToSecurePort);
 
     /// <summary>
     /// Start broadcasting to all radios that have IncludedInBroadcast set.
@@ -1946,7 +2011,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task ConnectVoiceAsync()
     {
-        LogDebug($"[Voice] ConnectVoiceAsync start: host={VoiceHost} port={VoicePort}");
+        var endpoint = ResolveServerEndpoint();
+        LogDebug($"[Voice] ConnectVoiceAsync start: host={endpoint.Host} port={endpoint.Port} scheme={endpoint.Scheme} normalized={endpoint.WasNormalizedToSecurePort}");
 
         // Tear down previous instances
         if (_reconnect != null)
@@ -1994,7 +2060,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         // Create and wire ReconnectManager
         _reconnect = new ReconnectManager(_voice);
-        _reconnect.SetConnectionParams(VoiceHost, VoicePort, GuildId, AuthToken);
+        var voiceHostForSocket = endpoint.Scheme == "http" ? "http://" + endpoint.Host : endpoint.Host;
+        _reconnect.SetConnectionParams(voiceHostForSocket, endpoint.Port, GuildId, AuthToken);
         _reconnect.StateChanged += OnReconnectStateChanged;
         _reconnect.Log += OnReconnectLog;
         _reconnect.Reconnected += OnReconnectedAsync;

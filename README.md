@@ -122,6 +122,11 @@ Die Idee basiert auf einem TS3 Plugin, leider ist dieses auf Github nicht mehr v
 - **Runtime**: .NET 10
 - **Hardware**: WASAPI-kompatible Soundkarte
 
+### Companion Verbindung (wichtig)
+- **Produktion**: In der Companion App den öffentlichen **Domain-Namen** des Servers verwenden.
+- **Port**: Standardmäßig **443** (TLS via Traefik), nicht den internen Backend-Port.
+- **Lokal/Entwicklung**: `localhost` oder `127.0.0.1` mit Backend-Port (standardmäßig `3000`).
+
 ---
 
 ## Discord OAuth2 Setup

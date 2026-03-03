@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -53,6 +55,12 @@ public sealed class OAuthPollResult
     public string? Error { get; set; }
 }
 
+public sealed class BackendFetchResult<T>
+{
+    public T? Data { get; set; }
+    public string? Error { get; set; }
+}
+
 public sealed class BackendClient : IDisposable
 {
     private readonly HttpClient _http;
@@ -80,22 +88,32 @@ public sealed class BackendClient : IDisposable
     // --- Static server verification methods (no instance needed) ---
 
     /// <summary>
-    /// Fetch server status from a base URL. Returns null on failure.
+    /// Fetch server status from a base URL.
     /// </summary>
-    public static async Task<ServerStatusInfo?> GetServerStatusAsync(string baseUrl)
+    public static async Task<BackendFetchResult<ServerStatusInfo>> GetServerStatusAsync(string baseUrl)
     {
+        var result = new BackendFetchResult<ServerStatusInfo>();
+
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
             var url = baseUrl.TrimEnd('/') + "/server-status";
             using var resp = await http.GetAsync(url);
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+            {
+                result.Error = $"Server returned HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase}).";
+                return result;
+            }
 
             var body = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
+            if (!doc.RootElement.TryGetProperty("data", out var data))
+            {
+                result.Error = "Server response did not include the expected data payload.";
+                return result;
+            }
 
-            return new ServerStatusInfo
+            result.Data = new ServerStatusInfo
             {
                 Version = data.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "",
                 DsgvoEnabled = data.TryGetProperty("dsgvoEnabled", out var d) && d.GetBoolean(),
@@ -104,38 +122,91 @@ public sealed class BackendClient : IDisposable
                 PolicyVersion = data.TryGetProperty("policyVersion", out var pv) ? pv.GetString() ?? "1.0" : "1.0",
                 OauthEnabled = data.TryGetProperty("oauthEnabled", out var oa) && oa.GetBoolean(),
             };
+            return result;
+        }
+        catch (TaskCanceledException)
+        {
+            result.Error = "Connection timed out. Check host, port, and firewall.";
+            return result;
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is AuthenticationException)
+        {
+            result.Error = "TLS certificate validation failed. Use your domain with a valid certificate (usually port 443).";
+            return result;
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is SocketException se && se.SocketErrorCode == SocketError.HostNotFound)
+        {
+            result.Error = "DNS lookup failed. Check the domain name.";
+            return result;
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is SocketException se && se.SocketErrorCode == SocketError.ConnectionRefused)
+        {
+            result.Error = "Connection refused. The service is not reachable on this port.";
+            return result;
+        }
+        catch (HttpRequestException ex)
+        {
+            result.Error = string.IsNullOrWhiteSpace(ex.Message)
+                ? "Network request failed."
+                : $"Network request failed: {ex.Message}";
+            return result;
         }
         catch
         {
-            return null;
+            result.Error = "Unexpected error while contacting server.";
+            return result;
         }
     }
 
     /// <summary>
-    /// Fetch privacy policy from a base URL. Returns null on failure.
+    /// Fetch privacy policy from a base URL.
     /// </summary>
-    public static async Task<PrivacyPolicyInfo?> GetPrivacyPolicyAsync(string baseUrl)
+    public static async Task<BackendFetchResult<PrivacyPolicyInfo>> GetPrivacyPolicyAsync(string baseUrl)
     {
+        var result = new BackendFetchResult<PrivacyPolicyInfo>();
+
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
             var url = baseUrl.TrimEnd('/') + "/privacy-policy";
             using var resp = await http.GetAsync(url);
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+            {
+                result.Error = $"Privacy policy request returned HTTP {(int)resp.StatusCode} ({resp.ReasonPhrase}).";
+                return result;
+            }
 
             var body = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
+            if (!doc.RootElement.TryGetProperty("data", out var data))
+            {
+                result.Error = "Server response did not include privacy policy data.";
+                return result;
+            }
 
-            return new PrivacyPolicyInfo
+            result.Data = new PrivacyPolicyInfo
             {
                 Version = data.TryGetProperty("version", out var v) ? v.GetString() ?? "1.0" : "1.0",
                 Text = data.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "",
             };
+            return result;
+        }
+        catch (TaskCanceledException)
+        {
+            result.Error = "Privacy policy request timed out.";
+            return result;
+        }
+        catch (HttpRequestException ex)
+        {
+            result.Error = string.IsNullOrWhiteSpace(ex.Message)
+                ? "Privacy policy request failed."
+                : $"Privacy policy request failed: {ex.Message}";
+            return result;
         }
         catch
         {
-            return null;
+            result.Error = "Unexpected error while fetching privacy policy.";
+            return result;
         }
     }
 
